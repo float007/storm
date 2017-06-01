@@ -174,7 +174,6 @@
                         TOPOLOGY-BOLTS-WINDOW-LENGTH-DURATION-MS
                         TOPOLOGY-BOLTS-SLIDING-INTERVAL-COUNT
                         TOPOLOGY-BOLTS-SLIDING-INTERVAL-DURATION-MS
-                        TOPOLOGY-BOLTS-TUPLE-TIMESTAMP-FIELD-NAME
                         TOPOLOGY-BOLTS-LATE-TUPLE-STREAM
                         TOPOLOGY-BOLTS-TUPLE-TIMESTAMP-MAX-LAG-MS
                         TOPOLOGY-BOLTS-MESSAGE-ID-FIELD-NAME
@@ -211,7 +210,7 @@
 
       (when (<= @interval-errors max-per-interval)
         (.report-error (:storm-cluster-state executor) (:storm-id executor) (:component-id executor)
-                              (hostname storm-conf)
+                              (hostname)
                               (.getThisWorkerPort ^WorkerTopologyContext (:worker-context executor)) error)
         ))))
 
@@ -273,8 +272,10 @@
                                (catch Exception e
                                  (log-message "Error while reporting error to cluster, proceeding with shutdown")))
                              (if (or
-                                    (exception-cause? InterruptedException error)
-                                    (exception-cause? java.io.InterruptedIOException error))
+                                   (exception-cause? InterruptedException error)
+                                   (and
+                                     (exception-cause? java.io.InterruptedIOException error)
+                                     (not (exception-cause? java.net.SocketTimeoutException error))))
                                (log-message "Got interrupted excpetion shutting thread down...")
                                ((:suicide-fn <>))))
      :sampler (mk-stats-sampler storm-conf)
@@ -334,7 +335,7 @@
          task-id (:task-id task-data)
          name->imetric (-> interval->task->metric-registry (get interval) (get task-id))
          task-info (IMetricsConsumer$TaskInfo.
-                     (hostname (:storm-conf executor-data))
+                     (hostname)
                      (.getThisWorkerPort worker-context)
                      (:component-id executor-data)
                      task-id

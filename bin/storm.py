@@ -99,6 +99,7 @@ STORM_EXT_CLASSPATH = os.getenv('STORM_EXT_CLASSPATH', None)
 STORM_EXT_CLASSPATH_DAEMON = os.getenv('STORM_EXT_CLASSPATH_DAEMON', None)
 DEP_JARS_OPTS = []
 DEP_ARTIFACTS_OPTS = []
+DEP_ARTIFACTS_REPOSITORIES_OPTS = []
 
 def get_config_opts():
     global CONFIG_OPTS
@@ -111,31 +112,26 @@ if not os.path.exists(STORM_LIB_DIR):
     print("******************************************")
     sys.exit(1)
 
-def get_jars_full(adir):
-    files = []
-    if os.path.isdir(adir):
-        files = os.listdir(adir)
-    elif os.path.exists(adir):
-        files = [adir]
-
-    ret = []
-    for f in files:
-        if f.endswith(".jar"):
-            ret.append(os.path.join(adir, f))
+# If given path is a dir, make it a wildcard so the JVM will include all JARs in the directory.
+def get_wildcard_dir(path):
+    if os.path.isdir(path):
+        ret = [(os.path.join(path, "*"))]
+    elif os.path.exists(path):
+        ret = [path]
     return ret
 
 def get_classpath(extrajars, daemon=True):
-    ret = get_jars_full(STORM_DIR)
-    ret.extend(get_jars_full(STORM_DIR + "/lib"))
-    ret.extend(get_jars_full(STORM_DIR + "/extlib"))
+    ret = get_wildcard_dir(STORM_DIR)
+    ret.extend(get_wildcard_dir(STORM_DIR + "/lib"))
+    ret.extend(get_wildcard_dir(STORM_DIR + "/extlib"))
     if daemon:
-        ret.extend(get_jars_full(STORM_DIR + "/extlib-daemon"))
+        ret.extend(get_wildcard_dir(STORM_DIR + "/extlib-daemon"))
     if STORM_EXT_CLASSPATH != None:
         for path in STORM_EXT_CLASSPATH.split(os.pathsep):
-            ret.extend(get_jars_full(path))
+            ret.extend(get_wildcard_dir(path))
     if daemon and STORM_EXT_CLASSPATH_DAEMON != None:
         for path in STORM_EXT_CLASSPATH_DAEMON.split(os.pathsep):
-            ret.extend(get_jars_full(path))
+            ret.extend(get_wildcard_dir(path))
     ret.extend(extrajars)
     return normclasspath(os.pathsep.join(ret))
 
@@ -157,22 +153,22 @@ def confvalue(name, extrapaths, daemon=True):
             return " ".join(tokens[1:])
     return ""
 
-def resolve_dependencies(artifacts):
+def resolve_dependencies(artifacts, artifact_repositories):
     if len(artifacts) == 0:
         return {}
 
-    print("Resolving dependencies on demand: artifacts (%s)" % artifacts)
+    print("Resolving dependencies on demand: artifacts (%s) with repositories (%s)" % (artifacts, artifact_repositories))
     sys.stdout.flush()
 
     # TODO: should we move some external modules to outer place?
 
     # storm-submit module doesn't rely on storm-core and relevant libs
-    extrajars = get_jars_full(STORM_DIR + "/external/storm-submit-tools")
+    extrajars = get_wildcard_dir(STORM_DIR + "/external/storm-submit-tools")
     classpath = normclasspath(os.pathsep.join(extrajars))
 
     command = [
         JAVA_CMD, "-client", "-cp", classpath, "org.apache.storm.submit.command.DependencyResolverMain",
-        ",".join(artifacts)
+        ",".join(artifacts), ",".join(artifact_repositories)
     ]
 
     p = sub.Popen(command, stdout=sub.PIPE)
@@ -257,7 +253,7 @@ def exec_storm_class(klass, jvmtype="-server", jvmopts=[], extrajars=[], args=[]
         try:
             ret = sub.check_output(all_args, stderr=sub.STDOUT)
             print(ret)
-        except sub.CalledProcessor as e:
+        except sub.CalledProcessError as e:
             sys.exit(e.returncode)
     else:
         os.execvp(JAVA_CMD, all_args)
@@ -279,14 +275,18 @@ def jar(jarfile, klass, *args):
     Please add exclusion artifacts with '^' separated string after the artifact.
     For example, --artifacts "redis.clients:jedis:2.9.0,org.apache.kafka:kafka_2.10:0.8.2.2^org.slf4j:slf4j-log4j12" will load jedis and kafka artifact and all of transitive dependencies but exclude slf4j-log4j12 from kafka.
 
-    Complete example of both options is here: `./bin/storm jar example/storm-starter/storm-starter-topologies-*.jar org.apache.storm.starter.RollingTopWords blobstore-remote2 remote --jars "./external/storm-redis/storm-redis-1.1.0.jar,./external/storm-kafka/storm-kafka-1.1.0.jar" --artifacts "redis.clients:jedis:2.9.0,org.apache.kafka:kafka_2.10:0.8.2.2^org.slf4j:slf4j-log4j12"`
+    When you need to pull the artifacts from other than Maven Central, you can pass remote repositories to --artifactRepositories option with comma-separated string.
+    Repository format is "<name>^<url>". '^' is taken as separator because URL allows various characters.
+    For example, --artifactRepositories "jboss-repository^http://repository.jboss.com/maven2,HDPRepo^http://repo.hortonworks.com/content/groups/public/" will add JBoss and HDP repositories for dependency resolver.
+
+    Complete example of options is here: `./bin/storm jar example/storm-starter/storm-starter-topologies-*.jar org.apache.storm.starter.RollingTopWords blobstore-remote2 remote --jars "./external/storm-redis/storm-redis-1.1.0.jar,./external/storm-kafka/storm-kafka-1.1.0.jar" --artifacts "redis.clients:jedis:2.9.0,org.apache.kafka:kafka_2.10:0.8.2.2^org.slf4j:slf4j-log4j12" --artifactRepositories "jboss-repository^http://repository.jboss.com/maven2,HDPRepo^http://repo.hortonworks.com/content/groups/public/"`
 
     When you pass jars and/or artifacts options, StormSubmitter will upload them when the topology is submitted, and they will be included to classpath of both the process which runs the class, and also workers for that topology.
     """
-    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS
+    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS
 
     local_jars = DEP_JARS_OPTS
-    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS)
+    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS)
 
     transform_class = confvalue("client.jartransformer.class", [CLUSTER_CONF_DIR])
     if (transform_class != None and transform_class != "nil"):
@@ -327,17 +327,17 @@ def sql(sql_file, topology_name):
     Compiles the SQL statements into a Trident topology and submits it to Storm.
     If user activates explain mode, SQL Runner analyzes each query statement and shows query plan instead of submitting topology.
 
-    --jars and --artifacts options available for jar are also applied to sql command.
-    Please refer "help jar" to see how to use --jars and --artifacts options.
+    --jars and --artifacts, and --artifactRepositories options available for jar are also applied to sql command.
+    Please refer "help jar" to see how to use --jars and --artifacts, and --artifactRepositories options.
     You normally want to pass these options since you need to set data source to your sql which is an external storage in many cases.
     """
-    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS
+    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS
 
     local_jars = DEP_JARS_OPTS
-    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS)
+    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS)
 
-    sql_core_jars = get_jars_full(STORM_DIR + "/external/sql/storm-sql-core")
-    sql_runtime_jars = get_jars_full(STORM_DIR + "/external/sql/storm-sql-runtime")
+    sql_core_jars = get_wildcard_dir(STORM_DIR + "/external/sql/storm-sql-core")
+    sql_runtime_jars = get_wildcard_dir(STORM_DIR + "/external/sql/storm-sql-runtime")
 
     # include storm-sql-runtime jar(s) to local jar list
     local_jars.extend(sql_runtime_jars)
@@ -834,38 +834,42 @@ def parse_config(config_list):
             CONFIG_OPTS.append(config)
 
 def parse_config_opts(args):
-  curr = args[:]
-  curr.reverse()
-  config_list = []
-  args_list = []
-  jars_list = []
-  artifacts_list = []
+    curr = args[:]
+    curr.reverse()
+    config_list = []
+    args_list = []
+    jars_list = []
+    artifacts_list = []
+    artifact_repositories_list = []
 
-  while len(curr) > 0:
-    token = curr.pop()
-    if token == "-c":
-      config_list.append(curr.pop())
-    elif token == "--config":
-      global CONFFILE
-      CONFFILE = curr.pop()
-    elif token == "--jars":
-      jars_list.extend(curr.pop().split(','))
-    elif token == "--artifacts":
-      artifacts_list.extend(curr.pop().split(','))
-    else:
-      args_list.append(token)
+    while len(curr) > 0:
+        token = curr.pop()
+        if token == "-c":
+            config_list.append(curr.pop())
+        elif token == "--config":
+            global CONFFILE
+            CONFFILE = curr.pop()
+        elif token == "--jars":
+            jars_list.extend(curr.pop().split(','))
+        elif token == "--artifacts":
+            artifacts_list.extend(curr.pop().split(','))
+        elif token == "--artifactRepositories":
+            artifact_repositories_list.extend(curr.pop().split(','))
+        else:
+            args_list.append(token)
 
-  return config_list, jars_list, artifacts_list, args_list
+    return config_list, jars_list, artifacts_list, artifact_repositories_list, args_list
 
 def main():
     if len(sys.argv) <= 1:
         print_usage()
         sys.exit(-1)
-    global CONFIG_OPTS, DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS
-    config_list, jars_list, artifacts_list, args = parse_config_opts(sys.argv[1:])
+    global CONFIG_OPTS, DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS
+    config_list, jars_list, artifacts_list, artifact_repositories_list, args = parse_config_opts(sys.argv[1:])
     parse_config(config_list)
     DEP_JARS_OPTS = jars_list
     DEP_ARTIFACTS_OPTS = artifacts_list
+    DEP_ARTIFACTS_REPOSITORIES_OPTS = artifact_repositories_list
     COMMAND = args[0]
     ARGS = args[1:]
     (COMMANDS.get(COMMAND, unknown_command))(*ARGS)

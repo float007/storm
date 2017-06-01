@@ -35,7 +35,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.storm.hdfs.common.HdfsUtils;
-import org.apache.storm.hdfs.common.security.HdfsSecurityUtil;
+import org.apache.storm.hdfs.security.HdfsSecurityUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,6 +72,8 @@ public class HdfsSpout extends BaseRichSpout {
 
   private String inprogress_suffix = ".inprogress"; // not configurable to prevent change between topology restarts
   private String ignoreSuffix = ".ignore";
+
+  private String outputStreamName= null;
 
   // other members
   private static final Logger LOG = LoggerFactory.getLogger(HdfsSpout.class);
@@ -177,6 +179,14 @@ public class HdfsSpout extends BaseRichSpout {
    * default key name is 'hdfs.config' */
   public HdfsSpout withConfigKey(String configKey) {
     this.configKey = configKey;
+    return this;
+  }
+
+  /**
+   * Set output stream name
+   */
+  public HdfsSpout withOutputStream(String streamName) {
+    this.outputStreamName = streamName;
     return this;
   }
 
@@ -345,7 +355,12 @@ public class HdfsSpout extends BaseRichSpout {
 
   protected void emitData(List<Object> tuple, MessageId id) {
     LOG.trace("Emitting - {}", id);
-    this.collector.emit(tuple, id);
+
+    if ( outputStreamName==null )
+      collector.emit( tuple, id );
+    else
+      collector.emit( outputStreamName, tuple, id );
+
     inflight.put(id, tuple);
   }
 
@@ -775,8 +790,13 @@ public class HdfsSpout extends BaseRichSpout {
     return newFile;
   }
 
+  @Override
   public void declareOutputFields(OutputFieldsDeclarer declarer) {
-    declarer.declare(outputFields);
+    if (outputStreamName!=null) {
+      declarer.declareStream(outputStreamName, outputFields);
+    } else {
+      declarer.declare(outputFields);
+    }
   }
 
   static class MessageId implements  Comparable<MessageId> {

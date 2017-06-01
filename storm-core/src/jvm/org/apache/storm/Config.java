@@ -487,6 +487,13 @@ public class Config extends HashMap<String, Object> {
     public static final String NIMBUS_THRIFT_TRANSPORT_PLUGIN = "nimbus.thrift.transport";
 
     /**
+     * How long before a Thrift Client socket hangs before timeout
+     * and restart the socket.
+     */
+    @isInteger
+    public static final String STORM_THRIFT_SOCKET_TIMEOUT_MS = "storm.thrift.socket.timeout.ms";
+
+    /**
      * The host that the master server is running on, added only for backward compatibility,
      * the usage deprecated in favor of nimbus.seeds config.
      */
@@ -947,7 +954,7 @@ public class Config extends HashMap<String, Object> {
     @Deprecated
     @isString
     public static final String PACEMAKER_HOST = "pacemaker.host";
-    
+
     /**
      * The port Pacemaker should run on. Clients should
      * connect to this port to submit or read heartbeats.
@@ -1174,7 +1181,7 @@ public class Config extends HashMap<String, Object> {
     /**
      * the metadata configured on the supervisor
      */
-    @isType(type=Map.class)
+    @isMapEntryType(keyType = String.class, valueType = String.class)
     public static final String SUPERVISOR_SCHEDULER_META = "supervisor.scheduler.meta";
 
     /**
@@ -1424,6 +1431,15 @@ public class Config extends HashMap<String, Object> {
     public static final String SUPERVISOR_CPU_CAPACITY = "supervisor.cpu.capacity";
 
     /**
+     * On some systems (windows for example) symlinks require special privileges that not everyone wants to
+     * grant a headless user.  You can completely disable the use of symlinks by setting this config to true, but
+     * by doing so you may also lose some features from storm.  For example the blobstore feature
+     * does not currently work without symlinks enabled.
+     */
+    @isBoolean
+    public static final String DISABLE_SYMLINKS = "storm.disable.symlinks";
+
+    /**
      * The jvm opts provided to workers launched by this supervisor.
      * All "%ID%", "%WORKER-ID%", "%TOPOLOGY-ID%",
      * "%WORKER-PORT%" and "%HEAP-MEM%" substrings are replaced with:
@@ -1438,7 +1454,7 @@ public class Config extends HashMap<String, Object> {
 
     /**
      * The default heap memory size in MB per worker, used in the jvm -Xmx opts for launching the worker
-      */
+     */
     @isInteger
     @isPositiveNumber
     public static final String WORKER_HEAP_MEMORY_MB = "worker.heap.memory.mb";
@@ -1905,14 +1921,6 @@ public class Config extends HashMap<String, Object> {
     @isPositiveNumber
     public static final String TOPOLOGY_BOLTS_SLIDING_INTERVAL_DURATION_MS = "topology.bolts.window.sliding.interval.duration.ms";
 
-    /*
-     * Bolt-specific configuration for windowed bolts to specify the name of the field in the tuple that holds
-     * the timestamp (e.g. the ts when the tuple was actually generated). If this config is specified and the
-     * field is not present in the incoming tuple, a java.lang.IllegalArgumentException will be thrown.
-     */
-    @isString
-    public static final String TOPOLOGY_BOLTS_TUPLE_TIMESTAMP_FIELD_NAME = "topology.bolts.tuple.timestamp.field.name";
-
     /**
      * Bolt-specific configuration for windowed bolts to specify the name of the stream on which late tuples are
      * going to be emitted. This configuration should only be used from the BaseWindowedBolt.withLateTupleStream builder
@@ -1921,10 +1929,10 @@ public class Config extends HashMap<String, Object> {
     @isString
     public static final String TOPOLOGY_BOLTS_LATE_TUPLE_STREAM = "topology.bolts.late.tuple.stream";
 
-    /*
+    /**
      * Bolt-specific configuration for windowed bolts to specify the maximum time lag of the tuple timestamp
      * in milliseconds. It means that the tuple timestamps cannot be out of order by more than this amount.
-     * This config will be effective only if the TOPOLOGY_BOLTS_TUPLE_TIMESTAMP_FIELD_NAME is also specified.
+     * This config will be effective only if {@link org.apache.storm.windowing.TimestampExtractor} is specified.
      */
     @isInteger
     @isPositiveNumber
@@ -1933,7 +1941,7 @@ public class Config extends HashMap<String, Object> {
     /*
      * Bolt-specific configuration for windowed bolts to specify the time interval for generating
      * watermark events. Watermark event tracks the progress of time when tuple timestamp is used.
-     * This config is effective only if TOPOLOGY_BOLTS_TUPLE_TIMESTAMP_FIELD_NAME is also specified.
+     * This config is effective only if {@link org.apache.storm.windowing.TimestampExtractor} is specified.
      */
     @isInteger
     @isPositiveNumber
@@ -1989,11 +1997,11 @@ public class Config extends HashMap<String, Object> {
     @isInteger
     public static final String TOPOLOGY_TICK_TUPLE_FREQ_SECS="topology.tick.tuple.freq.secs";
 
-   /**
-    * @deprecated this is no longer supported
-    * Configure the wait strategy used for internal queuing. Can be used to tradeoff latency
-    * vs. throughput
-    */
+    /**
+     * @deprecated this is no longer supported
+     * Configure the wait strategy used for internal queuing. Can be used to tradeoff latency
+     * vs. throughput
+     */
     @Deprecated
     @isString
     public static final String TOPOLOGY_DISRUPTOR_WAIT_STRATEGY="topology.disruptor.wait.strategy";
@@ -2268,6 +2276,17 @@ public class Config extends HashMap<String, Object> {
      */
     @isString
     public static final Object CLIENT_JAR_TRANSFORMER = "client.jartransformer.class";
+
+    /**
+     * This is a config that is not likely to be used.  Internally the disruptor queue will batch entries written
+     * into the queue.  A background thread pool will flush those batches if they get too old.  By default that
+     * pool can grow rather large, and sacrifice some CPU time to keep the latency low.  In some cases you may
+     * want the queue to be smaller so there is less CPU used, but the latency will increase in some situations.
+     * This configs is on a per cluster bases, if you want to control this on a per topology bases you need to set
+     * the java System property for the worker "num_flusher_pool_threads" to the value you want.
+     */
+    @isInteger
+    public static final String STORM_WORKER_DISRUPTOR_FLUSHER_MAX_POOL_SIZE = "storm.worker.disruptor.flusher.max.pool.size";
 
     public static void setClasspath(Map conf, String cp) {
         conf.put(Config.TOPOLOGY_CLASSPATH, cp);

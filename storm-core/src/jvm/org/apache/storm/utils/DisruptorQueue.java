@@ -31,6 +31,7 @@ import com.lmax.disruptor.TimeoutException;
 import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.dsl.ProducerType;
 
+import org.apache.storm.Config;
 import org.apache.storm.metric.api.IStatefulObject;
 import org.apache.storm.metric.internal.RateTracker;
 import org.apache.storm.metrics2.DisruptorMetrics;
@@ -65,7 +66,25 @@ public class DisruptorQueue implements IStatefulObject {
     private static final Object INTERRUPT = new Object();
     private static final String PREFIX = "disruptor-";
     private static final FlusherPool FLUSHER = new FlusherPool();
+    
     private static final Timer METRICS_TIMER = new Timer("disruptor-metrics-timer", true);
+    private static int getNumFlusherPoolThreads() {
+        int numThreads = 100;
+        try {
+        	Map<String, Object> conf = Utils.readStormConfig();
+        	numThreads = Utils.getInt(conf.get(Config.STORM_WORKER_DISRUPTOR_FLUSHER_MAX_POOL_SIZE), numThreads);
+        } catch (Exception e) {
+        	LOG.warn("Error while trying to read system config", e);
+        }
+        try {
+            String threads = System.getProperty("num_flusher_pool_threads", String.valueOf(numThreads));
+            numThreads = Integer.parseInt(threads);
+        } catch (Exception e) {
+            LOG.warn("Error while parsing number of flusher pool threads", e);
+        }
+        LOG.debug("Reading num_flusher_pool_threads Flusher pool threads: {}", numThreads);
+        return numThreads;
+    }
 
     private static class FlusherPool { 
     	private static final String THREAD_PREFIX = "disruptor-flush";
@@ -75,7 +94,7 @@ public class DisruptorQueue implements IStatefulObject {
         private HashMap<Long, TimerTask> _tt = new HashMap<>();
 
         public FlusherPool() {
-            _exec = new ThreadPoolExecutor(1, 100, 10, TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(1024), new ThreadPoolExecutor.DiscardPolicy());
+            _exec = new ThreadPoolExecutor(1, getNumFlusherPoolThreads(), 10, TimeUnit.SECONDS, new ArrayBlockingQueue<Runnable>(1024), new ThreadPoolExecutor.DiscardPolicy());
             ThreadFactory threadFactory = new ThreadFactoryBuilder()
                     .setDaemon(true)
                     .setNameFormat(THREAD_PREFIX + "-task-pool")

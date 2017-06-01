@@ -17,11 +17,12 @@
  */
 package org.apache.storm.submit.dependency;
 
-import org.sonatype.aether.artifact.Artifact;
-import org.sonatype.aether.graph.Dependency;
-import org.sonatype.aether.graph.Exclusion;
-import org.sonatype.aether.util.artifact.DefaultArtifact;
-import org.sonatype.aether.util.artifact.JavaScopes;
+import org.eclipse.aether.artifact.Artifact;
+import org.eclipse.aether.artifact.DefaultArtifact;
+import org.eclipse.aether.graph.Dependency;
+import org.eclipse.aether.graph.Exclusion;
+import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.util.artifact.JavaScopes;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -77,5 +78,14 @@ public class AetherUtils {
         }
         buffer.append(':').append(artifact.getVersion());
         return buffer.toString();
+    }
+
+    public static RemoteRepository parseRemoteRepository(String repository) {
+        String[] parts = repository.split("\\^");
+        if (parts.length < 2) {
+            throw new IllegalArgumentException("Bad remote repository form: " + repository);
+        }
+
+        return new RemoteRepository.Builder(parts[0], "default", parts[1]).build();
     }
 }

@@ -132,6 +132,8 @@ import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
+import org.apache.storm.generated.InvalidTopologyException;
+
 import clojure.lang.RT;
 
 public class Utils {
@@ -162,6 +164,7 @@ public class Utils {
 
     private static SerializationDelegate serializationDelegate;
     private static ClassLoader cl = null;
+    private static Map<String, Object> localConf;
 
     public static final boolean IS_ON_WINDOWS = "Windows_NT".equals(System.getenv("OS"));
     public static final String FILE_PATH_SEPARATOR = System.getProperty("file.separator");
@@ -171,8 +174,8 @@ public class Utils {
     public static final int SIGTERM = 15;
 
     static {
-        Map<String, Object> conf = readStormConfig();
-        serializationDelegate = getSerializationDelegate(conf);
+        localConf = readStormConfig();
+        serializationDelegate = getSerializationDelegate(localConf);
     }
 
     @SuppressWarnings("unchecked")
@@ -305,9 +308,7 @@ public class Utils {
             Object ret = JSONValue.parseWithException(in);
             in.close();
             return (Map<String,Object>)ret;
-        } catch (IOException ioe) {
-            throw new RuntimeException(ioe);
-        } catch (ParseException e) {
+        } catch (IOException | ParseException e) {
             throw new RuntimeException(e);
         }
     }
@@ -336,6 +337,7 @@ public class Utils {
         try {
             Time.sleep(millis);
         } catch(InterruptedException e) {
+            Thread.currentThread().interrupt();
             throw new RuntimeException(e);
         }
     }
@@ -1142,12 +1144,14 @@ public class Utils {
 
     public static CuratorFramework newCuratorStarted(Map conf, List<String> servers, Object port, String root, ZookeeperAuthInfo auth) {
         CuratorFramework ret = newCurator(conf, servers, port, root, auth);
+        LOG.info("Starting Utils Curator...");
         ret.start();
         return ret;
     }
 
     public static CuratorFramework newCuratorStarted(Map conf, List<String> servers, Object port, ZookeeperAuthInfo auth) {
         CuratorFramework ret = newCurator(conf, servers, port, auth);
+        LOG.info("Starting Utils Curator (2)...");
         ret.start();
         return ret;
     }
@@ -1339,6 +1343,25 @@ public class Utils {
         }
     }
 
+    public static void validateTopologyBlobStoreMap(Map<String, ?> stormConf, Set<String> blobStoreKeys) throws InvalidTopologyException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> blobStoreMap = (Map<String, Object>) stormConf.get(Config.TOPOLOGY_BLOBSTORE_MAP);
+        if (blobStoreMap != null) {
+            Set<String> mapKeys = blobStoreMap.keySet();
+            Set<String> missingKeys = new HashSet<>();
+
+            for (String key : mapKeys) {
+                if (!blobStoreKeys.contains(key)) {
+                    missingKeys.add(key);
+                }
+            }
+            if (!missingKeys.isEmpty()) {
+                throw new InvalidTopologyException("The topology blob store map does not " +
+                        "contain the valid keys to launch the topology " + missingKeys);
+            }
+        }
+    }
+    
     /**
      * Given a File input it will unzip the file in a the unzip directory
      * passed as the second parameter
@@ -1723,14 +1746,18 @@ public class Utils {
     /**
      * Gets the storm.local.hostname value, or tries to figure out the local hostname
      * if it is not set in the config.
-     * @param conf The storm config to read from
      * @return a string representation of the hostname.
-    */
-    public static String hostname (Map<String, Object> conf) throws UnknownHostException  {
-        if (conf == null) {
+     */
+    public static String hostname() throws UnknownHostException {
+        return _instance.hostnameImpl();
+    }
+
+    // Non-static impl methods exist for mocking purposes.
+    protected String hostnameImpl () throws UnknownHostException  {
+        if (localConf == null) {
             return memoizedLocalHostname();
         }
-        Object hostnameString = conf.get(Config.STORM_LOCAL_HOSTNAME);
+        Object hostnameString = localConf.get(Config.STORM_LOCAL_HOSTNAME);
         if (hostnameString == null || hostnameString.equals("")) {
             return memoizedLocalHostname();
         }
@@ -2049,6 +2076,16 @@ public class Utils {
     }
 
     /**
+     * a or b the first one that is not null
+     * @param a something
+     * @param b something else
+     * @return a or b the first one that is not null
+     */
+    public static <V> V OR(V a, V b) {
+        return a == null ? b : a;
+    }
+
+    /**
      * Writes a posix shell script file to be executed in its own process.
      * @param dir the directory under which the script is to be written
      * @param command the command the script is to execute
@@ -2234,4 +2271,24 @@ public class Utils {
         return ret;
     }
 
+    /**
+     * Add version information to the given topology
+     * @param topology the topology being submitted (MIGHT BE MODIFIED)
+     * @return topology
+     */
+    public static StormTopology addVersions(StormTopology topology) {
+        String stormVersion = VersionInfo.getVersion();
+        LOG.warn("STORM-VERSION new {} old {}", stormVersion, topology.get_storm_version());
+        if (stormVersion != null && 
+                !"Unknown".equalsIgnoreCase(stormVersion) && 
+                !topology.is_set_storm_version()) {
+            topology.set_storm_version(stormVersion);
+        }
+        
+        String jdkVersion = System.getProperty("java.version");
+        if (jdkVersion != null && !topology.is_set_jdk_version()) {
+            topology.set_jdk_version(jdkVersion);
+        }
+        return topology;
+    }
 }

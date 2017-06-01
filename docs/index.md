@@ -31,9 +31,6 @@ documentation: true
 
 ### Layers on Top of Storm
 
-* [Flux Data Driven Topology Builder](flux.html)
-* [SQL](storm-sql.html)
-
 #### Trident
 
 Trident is an alternative interface to Storm. It provides exactly-once processing, "transactional" datastore persistence, and a set of common stream analytics operations.
@@ -43,6 +40,22 @@ Trident is an alternative interface to Storm. It provides exactly-once processin
 * [Trident State](Trident-state.html)        -- exactly-once processing and fast, persistent aggregation
 * [Trident spouts](Trident-spouts.html)       -- transactional and non-transactional data intake
 * [Trident RAS API](Trident-RAS-API.html)     -- using the Resource Aware Scheduler with Trident.
+
+#### SQL
+
+The Storm SQL integration allows users to run SQL queries over streaming data in Storm.  
+
+NOTE: Storm SQL is an `experimental` feature, so the internals of Storm SQL and supported features are subject to change. 
+But small change will not affect the user experience. We will notify the user when breaking UX change is introduced.
+
+* [Storm SQL overview](storm-sql.html)
+* [Storm SQL example](storm-sql-example.html)
+* [Storm SQL reference](storm-sql-reference.html)
+* [Storm SQL internal](storm-sql-internal.html)
+
+#### Flux
+
+* [Flux Data Driven Topology Builder](flux.html)
 
 ### Setup and Deploying
 
@@ -57,6 +70,7 @@ Trident is an alternative interface to Storm. It provides exactly-once processin
 * [Resource Aware Scheduler](Resource_Aware_Scheduler_overview.html)
 * [Daemon Metrics/Monitoring](storm-metrics-profiling-internal-actions.html)
 * [Windows users guide](windows-users-guide.html)
+* [Classpath handling](Classpath-handling.html)
 
 ### Intermediate
 
@@ -70,6 +84,7 @@ Trident is an alternative interface to Storm. It provides exactly-once processin
 * [Metrics](Metrics.html)
 * [State Checkpointing](State-checkpointing.html)
 * [Windowing](Windowing.html)
+* [Joining Streams](Joins.html)
 * [Blobstore(Distcahce)](distcache-blobstore.html)
 
 ### Debugging
@@ -79,7 +94,7 @@ Trident is an alternative interface to Storm. It provides exactly-once processin
 * [Event Logging](Eventlogging.html)
 
 ### Integration With External Systems, and Other Libraries
-* [Apache Kafka Integration](storm-kafka.html)
+* [Apache Kafka Integration](storm-kafka.html), [New Kafka Consumer Integration](storm-kafka-client.html)
 * [Apache HBase Integration](storm-hbase.html)
 * [Apache HDFS Integration](storm-hdfs.html)
 * [Apache Hive Integration](storm-hive.html)
@@ -92,7 +107,17 @@ Trident is an alternative interface to Storm. It provides exactly-once processin
 * [Elasticsearch Integration](storm-elasticsearch.html)
 * [MQTT Integration](storm-mqtt.html)
 * [Mongodb Integration](storm-mongodb.html)
+* [OpenTSDB Integration](storm-opentsdb.html)
+* [Kinesis Integration](storm-kinesis.html)
+* [Druid Integration](storm-druid.html)
 * [Kestrel Integration](Kestrel-and-Storm.html)
+
+#### Container, Resource Management System Integration
+
+* [YARN Integration](https://github.com/yahoo/storm-yarn), [YARN Integration via Slider](http://docs.hortonworks.com/HDPDocuments/HDP2/HDP-2.3.2/bk_yarn_resource_mgt/content/ref-7d103a48-7c2e-4b7b-aab5-62c739a32ee0.1.html)
+* [Mesos Integration](https://github.com/mesos/storm)
+* [Docker Integration](https://hub.docker.com/_/storm/)
+* [Kubernetes Integration](https://github.com/kubernetes/kubernetes/tree/master/examples/storm)
 
 ### Advanced
 
