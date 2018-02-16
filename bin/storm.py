@@ -66,6 +66,12 @@ def init_storm_env():
     for option in options:
         value = config.get('environment', option)
         os.environ[option] = value
+        
+def get_java_cmd():
+    cmd = 'java' if not is_windows() else 'java.exe'
+    if JAVA_HOME:
+        cmd = os.path.join(JAVA_HOME, 'bin', cmd)
+    return cmd
 
 normclasspath = cygpath if sys.platform == 'cygwin' else identity
 STORM_DIR = os.sep.join(os.path.realpath( __file__ ).split(os.sep)[:-2])
@@ -94,7 +100,7 @@ CONFIG_OPTS = []
 CONFFILE = ""
 JAR_JVM_OPTS = shlex.split(os.getenv('STORM_JAR_JVM_OPTS', ''))
 JAVA_HOME = os.getenv('JAVA_HOME', None)
-JAVA_CMD = 'java' if not JAVA_HOME else os.path.join(JAVA_HOME, 'bin', 'java')
+JAVA_CMD = get_java_cmd(); 
 if JAVA_HOME and not os.path.exists(JAVA_CMD):
     print("ERROR:  JAVA_HOME is invalid.  Could not find bin/java at %s." % JAVA_HOME)
     sys.exit(1)
@@ -103,6 +109,9 @@ STORM_EXT_CLASSPATH_DAEMON = os.getenv('STORM_EXT_CLASSPATH_DAEMON', None)
 DEP_JARS_OPTS = []
 DEP_ARTIFACTS_OPTS = []
 DEP_ARTIFACTS_REPOSITORIES_OPTS = []
+DEP_PROXY_URL = None
+DEP_PROXY_USERNAME = None
+DEP_PROXY_PASSWORD = None
 
 def get_config_opts():
     global CONFIG_OPTS
@@ -114,6 +123,19 @@ if not os.path.exists(STORM_LIB_DIR):
     print("\nYou can download a Storm release at http://storm.apache.org/downloads.html")
     print("******************************************")
     sys.exit(1)
+
+def get_jars_full(adir):
+    files = []
+    if os.path.isdir(adir):
+        files = os.listdir(adir)
+    elif os.path.exists(adir):
+        files = [adir]
+
+    ret = []
+    for f in files:
+        if f.endswith(".jar"):
+            ret.append(os.path.join(adir, f))
+    return ret
 
 # If given path is a dir, make it a wildcard so the JVM will include all JARs in the directory.
 def get_wildcard_dir(path):
@@ -133,11 +155,9 @@ def get_classpath(extrajars, daemon=True, client=False):
     if daemon:
         ret.extend(get_wildcard_dir(os.path.join(STORM_DIR, "extlib-daemon")))
     if STORM_EXT_CLASSPATH != None:
-        for path in STORM_EXT_CLASSPATH.split(os.pathsep):
-            ret.extend(get_wildcard_dir(path))
+        ret.append(STORM_EXT_CLASSPATH)
     if daemon and STORM_EXT_CLASSPATH_DAEMON != None:
-        for path in STORM_EXT_CLASSPATH_DAEMON.split(os.pathsep):
-            ret.extend(get_wildcard_dir(path))
+        ret.append(STORM_EXT_CLASSPATH_DAEMON)
     ret.extend(extrajars)
     return normclasspath(os.pathsep.join(ret))
 
@@ -160,11 +180,15 @@ def confvalue(name, extrapaths, daemon=True):
     return ""
 
 
-def resolve_dependencies(artifacts, artifact_repositories):
+def resolve_dependencies(artifacts, artifact_repositories, proxy_url, proxy_username, proxy_password):
     if len(artifacts) == 0:
         return {}
 
     print("Resolving dependencies on demand: artifacts (%s) with repositories (%s)" % (artifacts, artifact_repositories))
+
+    if proxy_url is not None:
+        print("Proxy information: url (%s) username (%s)" % (proxy_url, proxy_username))
+
     sys.stdout.flush()
 
     # storm-submit module doesn't rely on storm-core and relevant libs
@@ -172,9 +196,17 @@ def resolve_dependencies(artifacts, artifact_repositories):
     classpath = normclasspath(os.pathsep.join(extrajars))
 
     command = [
-        JAVA_CMD, "-client", "-cp", classpath, "org.apache.storm.submit.command.DependencyResolverMain",
-        ",".join(artifacts), ",".join(artifact_repositories)
+        JAVA_CMD, "-client", "-cp", classpath, "org.apache.storm.submit.command.DependencyResolverMain"
     ]
+
+    command.extend(["--artifacts", ",".join(artifacts)])
+    command.extend(["--artifactRepositories", ",".join(artifact_repositories)])
+
+    if proxy_url is not None:
+        command.extend(["--proxyUrl", proxy_url])
+        if proxy_username is not None:
+            command.extend(["--proxyUsername", proxy_username])
+            command.extend(["--proxyPassword", proxy_password])
 
     p = sub.Popen(command, stdout=sub.PIPE)
     output, errors = p.communicate()
@@ -259,50 +291,30 @@ def exec_storm_class(klass, jvmtype="-server", jvmopts=[], extrajars=[], args=[]
             ret = sub.check_output(all_args, stderr=sub.STDOUT)
             print(ret)
         except sub.CalledProcessError as e:
+            print(e.output)
             sys.exit(e.returncode)
     else:
         os.execvp(JAVA_CMD, all_args)
     return exit_code
 
 def run_client_jar(jarfile, klass, args, daemon=False, client=True, extrajvmopts=[]):
-    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS
+    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS, DEP_PROXY_URL, DEP_PROXY_USERNAME, DEP_PROXY_PASSWORD
 
     local_jars = DEP_JARS_OPTS
-    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS)
+    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS, DEP_PROXY_URL, DEP_PROXY_USERNAME, DEP_PROXY_PASSWORD)
 
-    transform_class = confvalue("client.jartransformer.class", [CLUSTER_CONF_DIR])
-    if (transform_class != None and transform_class != "null"):
-        tmpjar = os.path.join(tempfile.gettempdir(), uuid.uuid1().hex+".jar")
-        exec_storm_class("org.apache.storm.daemon.ClientJarTransformerRunner", args=[transform_class, jarfile, tmpjar], fork=True, daemon=False)
-        extra_jars = [tmpjar, USER_CONF_DIR, STORM_BIN_DIR]
-        extra_jars.extend(local_jars)
-        extra_jars.extend(artifact_to_file_jars.values())
-        topology_runner_exit_code = exec_storm_class(
-                klass,
-                jvmtype="-client",
-                extrajars=extra_jars,
-                args=args,
-                daemon=daemon,
-                client=client,
-                fork=True,
-                jvmopts=JAR_JVM_OPTS + extrajvmopts + ["-Dstorm.jar=" + tmpjar] +
-                        ["-Dstorm.dependency.jars=" + ",".join(local_jars)] +
-                        ["-Dstorm.dependency.artifacts=" + json.dumps(artifact_to_file_jars)])
-        os.remove(tmpjar)
-        sys.exit(topology_runner_exit_code)
-    else:
-        extra_jars=[jarfile, USER_CONF_DIR, STORM_BIN_DIR]
-        extra_jars.extend(local_jars)
-        extra_jars.extend(artifact_to_file_jars.values())
-        exec_storm_class(
-            klass,
-            jvmtype="-client",
-            extrajars=extra_jars,
-            args=args,
-            daemon=False,
-            jvmopts=JAR_JVM_OPTS + extrajvmopts + ["-Dstorm.jar=" + jarfile] +
-                    ["-Dstorm.dependency.jars=" + ",".join(local_jars)] +
-                    ["-Dstorm.dependency.artifacts=" + json.dumps(artifact_to_file_jars)])
+    extra_jars=[jarfile, USER_CONF_DIR, STORM_BIN_DIR]
+    extra_jars.extend(local_jars)
+    extra_jars.extend(artifact_to_file_jars.values())
+    exec_storm_class(
+        klass,
+        jvmtype="-client",
+        extrajars=extra_jars,
+        args=args,
+        daemon=False,
+        jvmopts=JAR_JVM_OPTS + extrajvmopts + ["-Dstorm.jar=" + jarfile] +
+                ["-Dstorm.dependency.jars=" + ",".join(local_jars)] +
+                ["-Dstorm.dependency.artifacts=" + json.dumps(artifact_to_file_jars)])
 
 def local(jarfile, klass, *args):
     """Syntax: [storm local topology-jar-path class ...]
@@ -348,6 +360,11 @@ def jar(jarfile, klass, *args):
     Repository format is "<name>^<url>". '^' is taken as separator because URL allows various characters.
     For example, --artifactRepositories "jboss-repository^http://repository.jboss.com/maven2,HDPRepo^http://repo.hortonworks.com/content/groups/public/" will add JBoss and HDP repositories for dependency resolver.
 
+    You can also provide proxy information to let dependency resolver utilizing proxy if needed. There're three parameters for proxy:
+    --proxyUrl: URL representation of proxy ('http://host:port')
+    --proxyUsername: username of proxy if it requires basic auth
+    --proxyPassword: password of proxy if it requires basic auth
+
     Complete example of options is here: `./bin/storm jar example/storm-starter/storm-starter-topologies-*.jar org.apache.storm.starter.RollingTopWords blobstore-remote2 remote --jars "./external/storm-redis/storm-redis-1.1.0.jar,./external/storm-kafka/storm-kafka-1.1.0.jar" --artifacts "redis.clients:jedis:2.9.0,org.apache.kafka:kafka_2.10:0.8.2.2^org.slf4j:slf4j-log4j12" --artifactRepositories "jboss-repository^http://repository.jboss.com/maven2,HDPRepo^http://repo.hortonworks.com/content/groups/public/"`
 
     When you pass jars and/or artifacts options, StormSubmitter will upload them when the topology is submitted, and they will be included to classpath of both the process which runs the class, and also workers for that topology.
@@ -363,19 +380,18 @@ def sql(sql_file, topology_name):
     Compiles the SQL statements into a Trident topology and submits it to Storm.
     If user activates explain mode, SQL Runner analyzes each query statement and shows query plan instead of submitting topology.
 
-    --jars and --artifacts, and --artifactRepositories options available for jar are also applied to sql command.
-    Please refer "help jar" to see how to use --jars and --artifacts, and --artifactRepositories options.
+    --jars and --artifacts, and --artifactRepositories, --proxyUrl, --proxyUsername, --proxyPassword options available for jar are also applied to sql command.
+    Please refer "help jar" to see how to use --jars and --artifacts, and --artifactRepositories, --proxyUrl, --proxyUsername, --proxyPassword options.
     You normally want to pass these options since you need to set data source to your sql which is an external storage in many cases.
     """
-    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS
+    global DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS, DEP_PROXY_URL, DEP_PROXY_USERNAME, DEP_PROXY_PASSWORD
 
     local_jars = DEP_JARS_OPTS
-    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS)
-
-    sql_core_jars = get_wildcard_dir(os.path.join(STORM_TOOLS_LIB_DIR, "sql", "core"))
-    sql_runtime_jars = get_wildcard_dir(os.path.join(STORM_TOOLS_LIB_DIR, "sql", "runtime"))
+    artifact_to_file_jars = resolve_dependencies(DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS, DEP_PROXY_URL, DEP_PROXY_USERNAME, DEP_PROXY_PASSWORD)
 
     # include storm-sql-runtime jar(s) to local jar list
+    # --jars doesn't support wildcard so it should call get_jars_full
+    sql_runtime_jars = get_jars_full(os.path.join(STORM_TOOLS_LIB_DIR, "sql", "runtime"))
     local_jars.extend(sql_runtime_jars)
 
     extrajars=[USER_CONF_DIR, STORM_BIN_DIR]
@@ -383,6 +399,7 @@ def sql(sql_file, topology_name):
     extrajars.extend(artifact_to_file_jars.values())
 
     # include this for running StormSqlRunner, but not for generated topology
+    sql_core_jars = get_wildcard_dir(os.path.join(STORM_TOOLS_LIB_DIR, "sql", "core"))
     extrajars.extend(sql_core_jars)
 
     if topology_name == "--explain":
@@ -420,12 +437,12 @@ def kill(*args):
 
 
 def upload_credentials(*args):
-    """Syntax: [storm upload_credentials topology-name [credkey credvalue]*]
+    """Syntax: [storm upload-credentials topology-name [credkey credvalue]*]
 
     Uploads a new set of credentials to a running topology
     """
     if not args:
-        print_usage(command="upload_credentials")
+        print_usage(command="upload-credentials")
         sys.exit(2)
     exec_storm_class(
         "org.apache.storm.command.UploadCredentials",
@@ -544,10 +561,10 @@ def deactivate(*args):
         extrajars=[USER_CONF_DIR, STORM_BIN_DIR])
 
 def rebalance(*args):
-    """Syntax: [storm rebalance topology-name [-w wait-time-secs] [-n new-num-workers] [-e component=parallelism]*]
+    """Syntax: [storm rebalance topology-name [-w wait-time-secs] [-n new-num-workers] [-e component=parallelism]*  [-r '{"component1": {"resource1": new_amount, "resource2": new_amount, ... }*}'] [-t '{"conf1": newValue, *}']]
 
-    Sometimes you may wish to spread out where the workers for a topology
-    are running. For example, let's say you have a 10 node cluster running
+    Sometimes you may wish to spread out the workers for a running topology.
+    For example, let's say you have a 10 node cluster running
     4 workers per node, and then let's say you add another 10 nodes to
     the cluster. You may wish to have Storm spread out the workers for the
     running topology so that each node runs 2 workers. One way to do this
@@ -555,14 +572,15 @@ def rebalance(*args):
     command that provides an easier way to do this.
 
     Rebalance will first deactivate the topology for the duration of the
-    message timeout (overridable with the -w flag) and then redistribute
-    the workers evenly around the cluster. The topology will then return to
-    its previous state of activation (so a deactivated topology will still
-    be deactivated and an activated topology will go back to being activated).
+    message timeout (overridable with the -w flag) make requested adjustments to the topology
+    and let the scheduler try to find a better scheduling based off of the
+    new situation. The topology will then return to its previous state of activation
+    (so a deactivated topology will still be deactivated and an activated
+    topology will go back to being activated).
 
-    The rebalance command can also be used to change the parallelism of a running topology.
-    Use the -n and -e switches to change the number of workers or number of executors of a component
-    respectively.
+    Some of what you can change about a topology includes the number of requested workers (-n flag)
+    The number of executors for a given component (-e flag) the resources each component is
+    requesting as used by the resource aware scheduler (-r flag) and configs (-t flag).
     """
     if not args:
         print_usage(command="rebalance")
@@ -581,7 +599,7 @@ def get_errors(*args):
     The result is returned in json format.
     """
     if not args:
-        print_usage(command="get_errors")
+        print_usage(command="get-errors")
         sys.exit(2)
     exec_storm_class(
         "org.apache.storm.command.GetErrors",
@@ -722,7 +740,6 @@ def supervisor(klass="org.apache.storm.daemon.supervisor.Supervisor"):
     cppaths = [CLUSTER_CONF_DIR]
     jvmopts = parse_args(confvalue("supervisor.childopts", cppaths)) + [
         "-Dlogfile.name=" + STORM_SUPERVISOR_LOG_FILE,
-        "-DLog4jContextSelector=org.apache.logging.log4j.core.async.AsyncLoggerContextSelector",
         "-Dlog4j.configurationFile=" + os.path.join(get_log4j2_conf_dir(), "cluster.xml"),
     ]
     exec_storm_class(
@@ -771,12 +788,35 @@ def logviewer():
         "-DLog4jContextSelector=org.apache.logging.log4j.core.async.AsyncLoggerContextSelector",
         "-Dlog4j.configurationFile=" + os.path.join(get_log4j2_conf_dir(), "cluster.xml")
     ]
+
+    allextrajars = get_wildcard_dir(STORM_WEBAPP_LIB_DIR)
+    allextrajars.append(CLUSTER_CONF_DIR)
     exec_storm_class(
-        "org.apache.storm.daemon.logviewer",
+        "org.apache.storm.daemon.logviewer.LogviewerServer",
         jvmtype="-server",
         daemonName="logviewer",
         jvmopts=jvmopts,
-        extrajars=[STORM_DIR, CLUSTER_CONF_DIR])
+        extrajars=allextrajars)
+
+
+def drpcclient(*args):
+    """Syntax: [storm drpc-client [options] ([function argument]*)|(argument*)]
+
+    Provides a very simple way to send DRPC requests.
+    If a -f argument is supplied to set the function name all of the arguments are treated
+    as arguments to the function.  If no function is given the arguments must
+    be pairs of function argument.
+
+    The server and port are picked from the configs.
+    """
+    if not args:
+        print_usage(command="drpc-client")
+        sys.exit(2)
+    exec_storm_class(
+        "org.apache.storm.command.BasicDrpcClient",
+        args=args,
+        jvmtype="-client",
+        extrajars=[USER_CONF_DIR, STORM_BIN_DIR])
 
 def drpc():
     """Syntax: [storm drpc]
@@ -882,7 +922,7 @@ def unknown_command(*args):
     sys.exit(254)
 
 COMMANDS = {"local": local, "jar": jar, "kill": kill, "shell": shell, "nimbus": nimbus, "ui": ui, "logviewer": logviewer,
-            "drpc": drpc, "supervisor": supervisor, "localconfvalue": print_localconfvalue,
+            "drpc": drpc, "drpc-client": drpcclient, "supervisor": supervisor, "localconfvalue": print_localconfvalue,
             "remoteconfvalue": print_remoteconfvalue, "repl": repl, "classpath": print_classpath, "server_classpath": print_server_classpath,
             "activate": activate, "deactivate": deactivate, "rebalance": rebalance, "help": print_usage,
             "list": listtopos, "dev-zookeeper": dev_zookeeper, "version": version, "monitor": monitor,
@@ -938,6 +978,9 @@ def parse_config_opts(args):
     jars_list = []
     artifacts_list = []
     artifact_repositories_list = []
+    proxy_url = None
+    proxy_username = None
+    proxy_password = None
 
     while len(curr) > 0:
         token = curr.pop()
@@ -952,21 +995,33 @@ def parse_config_opts(args):
             artifacts_list.extend(curr.pop().split(','))
         elif token == "--artifactRepositories":
             artifact_repositories_list.extend(curr.pop().split(','))
+        elif token == "--proxyUrl":
+            proxy_url = curr.pop()
+        elif token == "--proxyUsername":
+            proxy_username = curr.pop()
+        elif token == "--proxyPassword":
+            proxy_password = curr.pop()
         else:
             args_list.append(token)
 
-    return config_list, jars_list, artifacts_list, artifact_repositories_list, args_list
+    return config_list, jars_list, artifacts_list, artifact_repositories_list, \
+           proxy_url, proxy_username, proxy_password, args_list
 
 def main():
     if len(sys.argv) <= 1:
         print_usage()
         sys.exit(-1)
-    global CONFIG_OPTS, DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS
-    config_list, jars_list, artifacts_list, artifact_repositories_list, args = parse_config_opts(sys.argv[1:])
+    global CONFIG_OPTS, DEP_JARS_OPTS, DEP_ARTIFACTS_OPTS, DEP_ARTIFACTS_REPOSITORIES_OPTS, DEP_PROXY_URL, \
+        DEP_PROXY_USERNAME, DEP_PROXY_PASSWORD
+    config_list, jars_list, artifacts_list, artifact_repositories_list, proxy_url, proxy_username, \
+    proxy_password, args = parse_config_opts(sys.argv[1:])
     parse_config(config_list)
     DEP_JARS_OPTS = jars_list
     DEP_ARTIFACTS_OPTS = artifacts_list
     DEP_ARTIFACTS_REPOSITORIES_OPTS = artifact_repositories_list
+    DEP_PROXY_URL = proxy_url
+    DEP_PROXY_USERNAME = proxy_username
+    DEP_PROXY_PASSWORD = proxy_password
     COMMAND = args[0]
     ARGS = args[1:]
     (COMMANDS.get(COMMAND, unknown_command))(*ARGS)

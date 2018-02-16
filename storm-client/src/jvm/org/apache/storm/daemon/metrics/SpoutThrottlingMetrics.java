@@ -15,43 +15,32 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.storm.daemon.metrics;
 
 import org.apache.storm.metric.api.CountMetric;
-import org.apache.storm.stats.CommonStats;
 
 public class SpoutThrottlingMetrics extends BuiltinMetrics {
-    private final CountMetric skippedMaxSpout = new CountMetric();
-    private final CountMetric skippedThrottle = new CountMetric();
-    private final CountMetric skippedInactive = new CountMetric();
+    private final CountMetric skippedMaxSpoutMs = new CountMetric();
+    private final CountMetric skippedInactiveMs = new CountMetric();
+    private final CountMetric skippedBackPressureMs = new CountMetric();
 
     public SpoutThrottlingMetrics() {
-        this.metricMap.put("skipped-max-spout", skippedMaxSpout);
-        this.metricMap.put("skipped-throttle", skippedThrottle);
-        this.metricMap.put("skipped-inactive", skippedInactive);
+        metricMap.put("skipped-max-spout-ms", skippedMaxSpoutMs);
+        metricMap.put("skipped-inactive-ms", skippedInactiveMs);
+        metricMap.put("skipped-backpressure-ms", skippedBackPressureMs);
+
     }
 
-    public CountMetric getSkippedMaxSpout() {
-        return skippedMaxSpout;
+    public void skippedMaxSpoutMs(long ms) {
+        this.skippedMaxSpoutMs.incrBy(ms);
     }
 
-    public CountMetric getSkippedThrottle() {
-        return skippedThrottle;
+    public void skippedInactiveMs(long ms) {
+        this.skippedInactiveMs.incrBy(ms);
     }
 
-    public CountMetric getSkippedInactive() {
-        return skippedInactive;
-    }
-
-    public void skippedMaxSpout(CommonStats stats) {
-        this.skippedMaxSpout.incrBy(stats.getRate());
-    }
-
-    public void skippedThrottle(CommonStats stats) {
-        this.skippedThrottle.incrBy(stats.getRate());
-    }
-
-    public void skippedInactive(CommonStats stats) {
-        this.skippedInactive.incrBy(stats.getRate());
+    public void skippedBackPressureMs(long ms) {
+        this.skippedBackPressureMs.incrBy(ms);
     }
 }

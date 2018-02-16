@@ -31,9 +31,7 @@ import java.io.InputStreamReader;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
 import java.io.Serializable;
-import java.io.StringWriter;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -44,6 +42,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -65,19 +64,26 @@ import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
+import com.google.common.collect.Lists;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.input.ClassLoaderObjectInputStream;
 import org.apache.storm.Config;
+import org.apache.storm.blobstore.BlobStore;
 import org.apache.storm.blobstore.ClientBlobStore;
+import org.apache.storm.blobstore.NimbusBlobStore;
+import org.apache.storm.generated.AuthorizationException;
 import org.apache.storm.generated.ClusterSummary;
 import org.apache.storm.generated.ComponentCommon;
 import org.apache.storm.generated.ComponentObject;
 import org.apache.storm.generated.GlobalStreamId;
 import org.apache.storm.generated.InvalidTopologyException;
+import org.apache.storm.generated.KeyNotFoundException;
 import org.apache.storm.generated.Nimbus;
 import org.apache.storm.generated.StormTopology;
 import org.apache.storm.generated.TopologyInfo;
 import org.apache.storm.generated.TopologySummary;
+import org.apache.storm.generated.WorkerToken;
+import org.apache.storm.security.auth.ReqContext;
 import org.apache.storm.serialization.DefaultSerializationDelegate;
 import org.apache.storm.serialization.SerializationDelegate;
 import org.apache.thrift.TBase;
@@ -96,11 +102,13 @@ import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import com.google.common.annotations.VisibleForTesting;
 
+import javax.security.auth.Subject;
+
 public class Utils {
     public static final Logger LOG = LoggerFactory.getLogger(Utils.class);
     public static final String DEFAULT_STREAM_ID = "default";
-
-    public static final String FILE_PATH_SEPARATOR = System.getProperty("file.separator");
+    private static final Set<Class> defaultAllowedExceptions = new HashSet<>();
+    private static final List<String> LOCALHOST_ADDRESSES = Lists.newArrayList("localhost", "127.0.0.1", "0:0:0:0:0:0:0:1");
 
     private static ThreadLocal<TSerializer> threadSer = new ThreadLocal<TSerializer>();
     private static ThreadLocal<TDeserializer> threadDes = new ThreadLocal<TDeserializer>();
@@ -285,12 +293,22 @@ public class Utils {
      * runtime to avoid any zombie process in case cleanup function hangs.
      */
     public static void addShutdownHookWithForceKillIn1Sec (Runnable func) {
+        addShutdownHookWithDelayedForceKill(func, 1);
+    }
+
+    /**
+     * Adds the user supplied function as a shutdown hook for cleanup.
+     * Also adds a function that sleeps for numSecs and then halts the
+     * runtime to avoid any zombie process in case cleanup function hangs.
+     */
+    public static void addShutdownHookWithDelayedForceKill (Runnable func, int numSecs) {
         Runnable sleepKill = new Runnable() {
             @Override
             public void run() {
                 try {
-                    Time.sleepSecs(1);
-                    LOG.warn("Forceing Halt...");
+                    LOG.info("Halting after {} seconds", numSecs);
+                    Time.sleepSecs(numSecs);
+                    LOG.warn("Forcing Halt...");
                     Runtime.getRuntime().halt(20);
                 } catch (Exception e) {
                     LOG.warn("Exception in the ShutDownHook", e);
@@ -323,20 +341,22 @@ public class Utils {
      * @return the newly created thread
      * @see Thread
      */
-    public static SmartThread asyncLoop(final Callable afn,
-            boolean isDaemon, final Thread.UncaughtExceptionHandler eh,
-            int priority, final boolean isFactory, boolean startImmediately,
-            String threadName) {
+    public static SmartThread asyncLoop(final Callable afn, boolean isDaemon, final Thread.UncaughtExceptionHandler eh,
+                                        int priority, final boolean isFactory, boolean startImmediately,
+                                        String threadName) {
         SmartThread thread = new SmartThread(new Runnable() {
             public void run() {
-                Object s;
                 try {
-                    Callable fn = isFactory ? (Callable) afn.call() : afn;
-                    while ((s = fn.call()) instanceof Long) {
-                        Time.sleepSecs((Long) s);
+                    final Callable<Long> fn = isFactory ? (Callable<Long>) afn.call() : afn;
+                    while (true) {
+                        final Long s = fn.call();
+                        if (s==null) // then stop running it
+                            break;
+                        if (s>0)
+                            Time.sleep(s);
                     }
                 } catch (Throwable t) {
-                    if (exceptionCauseIsInstanceOf(
+                    if (Utils.exceptionCauseIsInstanceOf(
                             InterruptedException.class, t)) {
                         LOG.info("Async loop interrupted!");
                         return;
@@ -352,7 +372,7 @@ public class Utils {
             thread.setUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
                 public void uncaughtException(Thread t, Throwable e) {
                     LOG.error("Async loop died!", e);
-                    exitProcess(1, "Async loop died!");
+                    Utils.exitProcess(1, "Async loop died!");
                 }
             });
         }
@@ -396,14 +416,24 @@ public class Utils {
      * @return true if throwable is instance of klass, false otherwise.
      */
     public static boolean exceptionCauseIsInstanceOf(Class klass, Throwable throwable) {
-        Throwable t = throwable;
+        return unwrapTo(klass, throwable) != null;
+    }
+
+    public static <T extends Throwable> T unwrapTo(Class<T> klass, Throwable t) {
         while (t != null) {
             if (klass.isInstance(t)) {
-                return true;
+                return (T)t;
             }
             t = t.getCause();
         }
-        return false;
+        return null;
+    }
+
+    public static <T extends Throwable> void unwrapAndThrow(Class<T> klass, Throwable t) throws T {
+        T ret = unwrapTo(klass, t);
+        if (ret != null) {
+            throw ret;
+        }
     }
 
     public static RuntimeException wrapInRuntime(Exception e){
@@ -498,6 +528,14 @@ public class Utils {
         return ret.toString();
     }
 
+    public static Id parseZkId(String id, String configName) {
+        String[] split = id.split(":", 2);
+        if (split.length != 2) {
+            throw new IllegalArgumentException(configName + " does not appear to be in the form scheme:acl, i.e. sasl:storm-user");
+        }
+        return new Id(split[0], split[1]);
+    }
+
     public static List<ACL> getWorkerACL(Map<String, Object> conf) {
         //This is a work around to an issue with ZK where a sasl super user is not super unless there is an open SASL ACL so we are trying to give the correct perms
         if (!isZkAuthenticationConfiguredTopology(conf)) {
@@ -507,12 +545,8 @@ public class Utils {
         if (stormZKUser == null) {
             throw new IllegalArgumentException("Authentication is enabled but " + Config.STORM_ZOOKEEPER_SUPERACL + " is not set");
         }
-        String[] split = stormZKUser.split(":", 2);
-        if (split.length != 2) {
-            throw new IllegalArgumentException(Config.STORM_ZOOKEEPER_SUPERACL + " does not appear to be in the form scheme:acl, i.e. sasl:storm-user");
-        }
-        ArrayList<ACL> ret = new ArrayList<ACL>(ZooDefs.Ids.CREATOR_ALL_ACL);
-        ret.add(new ACL(ZooDefs.Perms.ALL, new Id(split[0], split[1])));
+        ArrayList<ACL> ret = new ArrayList<>(ZooDefs.Ids.CREATOR_ALL_ACL);
+        ret.add(new ACL(ZooDefs.Perms.ALL, parseZkId(stormZKUser, Config.STORM_ZOOKEEPER_SUPERACL)));
         return ret;
     }
 
@@ -528,7 +562,11 @@ public class Utils {
     }
 
     public static void handleUncaughtException(Throwable t) {
-        if (t != null && t instanceof Error) {
+        handleUncaughtException(t, defaultAllowedExceptions);
+    }
+
+    public static void handleUncaughtException(Throwable t, Set<Class> allowedExceptions) {
+        if (t != null) {
             if (t instanceof OutOfMemoryError) {
                 try {
                     System.err.println("Halting due to Out Of Memory Error..." + Thread.currentThread().getName());
@@ -536,17 +574,16 @@ public class Utils {
                     //Again we don't want to exit because of logging issues.
                 }
                 Runtime.getRuntime().halt(-1);
-            } else {
-                //Running in daemon mode, we would pass Error to calling thread.
-                throw (Error) t;
             }
-        } else if (t instanceof Exception) {
-            System.err.println("Uncaught Exception detected. Leave error log and ignore... Exception: " + t);
-            System.err.println("Stack trace:");
-            StringWriter sw = new StringWriter();
-            t.printStackTrace(new PrintWriter(sw));
-            System.err.println(sw.toString());
         }
+
+        if(allowedExceptions.contains(t.getClass())) {
+            LOG.info("Swallowing {} {}", t.getClass(), t);
+            return;
+        }
+
+        //Running in daemon mode, we would pass Error to calling thread.
+        throw new Error(t);
     }
 
     public static byte[] thriftSerialize(TBase t) {
@@ -662,6 +699,27 @@ public class Utils {
 
     public static <T> T deserialize(byte[] serialized, Class<T> clazz) {
         return serializationDelegate.deserialize(serialized, clazz);
+    }
+
+    /**
+     * Serialize an object using the configured serialization and then base64 encode it into a string.
+     * @param obj the object to encode
+     * @return a string with the encoded object in it.
+     */
+    public static String serializeToString(Object obj) {
+        return Base64.getEncoder().encodeToString(serializationDelegate.serialize(obj));
+    }
+
+    /**
+     * Deserialize an object stored in a string. The String is assumed to be a base64 encoded string
+     * containing the bytes to actually deserialize.
+     * @param str the encoded string.
+     * @param clazz the thrift class we are expecting.
+     * @param <T> The type of clazz
+     * @return the decoded object
+     */
+    public static <T> T deserializeFromString(String str, Class<T> clazz) {
+        return deserialize(Base64.getDecoder().decode(str), clazz);
     }
 
     public static byte[] toByteArray(ByteBuffer buffer) {
@@ -896,36 +954,40 @@ public class Utils {
 
     /**
      * parses the arguments to extract jvm heap memory size in MB.
-     * @param input
+     * @param options
      * @param defaultValue
      * @return the value of the JVM heap memory setting (in MB) in a java command.
      */
-    public static Double parseJvmHeapMemByChildOpts(String input, Double defaultValue) {
-        if (input != null) {
-            Pattern optsPattern = Pattern.compile("Xmx[0-9]+[mkgMKG]");
-            Matcher m = optsPattern.matcher(input);
-            String memoryOpts = null;
-            while (m.find()) {
-                memoryOpts = m.group();
-            }
-            if (memoryOpts != null) {
-                int unit = 1;
-                memoryOpts = memoryOpts.toLowerCase();
-
-                if (memoryOpts.endsWith("k")) {
-                    unit = 1024;
-                } else if (memoryOpts.endsWith("m")) {
-                    unit = 1024 * 1024;
-                } else if (memoryOpts.endsWith("g")) {
-                    unit = 1024 * 1024 * 1024;
+    public static Double parseJvmHeapMemByChildOpts(List<String> options, Double defaultValue) {
+        if (options != null) {
+            Pattern optsPattern = Pattern.compile("Xmx([0-9]+)([mkgMKG])");
+            for (String option : options) {
+                if (option == null) {
+                    continue;
                 }
-
-                memoryOpts = memoryOpts.replaceAll("[a-zA-Z]", "");
-                Double result =  Double.parseDouble(memoryOpts) * unit / 1024.0 / 1024.0;
-                return (result < 1.0) ? 1.0 : result;
-            } else {
-                return defaultValue;
+                Matcher m = optsPattern.matcher(option);
+                while (m.find()) {
+                    int value = Integer.parseInt(m.group(1));
+                    char unitChar = m.group(2).toLowerCase().charAt(0);
+                    int unit;
+                    switch (unitChar) {
+                    case 'k':
+                        unit = 1024;
+                        break;
+                    case 'm':
+                        unit = 1024 * 1024;
+                        break;
+                    case 'g':
+                        unit = 1024 * 1024 * 1024;
+                        break;
+                    default:
+                        unit = 1;
+                    }
+                    Double result =  value * unit / 1024.0 / 1024.0;
+                    return (result < 1.0) ? 1.0 : result;
+                }
             }
+            return defaultValue;
         } else {
             return defaultValue;
         }
@@ -998,21 +1060,62 @@ public class Utils {
         return null;
     }
 
-    public static void validateTopologyBlobStoreMap(Map<String, Object> topoConf, Set<String> blobStoreKeys) throws InvalidTopologyException {
-        @SuppressWarnings("unchecked")
+    /**
+     * Validate topology blobstore map.
+     * @param topoConf Topology configuration
+     * @throws InvalidTopologyException
+     * @throws AuthorizationException
+     */
+    public static void validateTopologyBlobStoreMap(Map<String, Object> topoConf) throws InvalidTopologyException, AuthorizationException {
+        try (NimbusBlobStore client = new NimbusBlobStore()) {
+            client.prepare(topoConf);
+            validateTopologyBlobStoreMap(topoConf, client);
+        }
+    }
+
+    /**
+     * Validate topology blobstore map.
+     * @param topoConf Topology configuration
+     * @param client The NimbusBlobStore client. It must call prepare() before being used here.
+     * @throws InvalidTopologyException
+     * @throws AuthorizationException
+     */
+    public static void validateTopologyBlobStoreMap(Map<String, Object> topoConf, NimbusBlobStore client)
+            throws InvalidTopologyException, AuthorizationException {
         Map<String, Object> blobStoreMap = (Map<String, Object>) topoConf.get(Config.TOPOLOGY_BLOBSTORE_MAP);
         if (blobStoreMap != null) {
-            Set<String> mapKeys = blobStoreMap.keySet();
-            Set<String> missingKeys = new HashSet<>();
-
-            for (String key : mapKeys) {
-                if (!blobStoreKeys.contains(key)) {
-                    missingKeys.add(key);
+            for (String key : blobStoreMap.keySet()) {
+                // try to get BlobMeta
+                // This will check if the key exists and if the subject has authorization
+                try {
+                    client.getBlobMeta(key);
+                } catch (KeyNotFoundException keyNotFound) {
+                    // wrap KeyNotFoundException in an InvalidTopologyException
+                    throw new InvalidTopologyException("Key not found: " + keyNotFound.get_msg());
                 }
             }
-            if (!missingKeys.isEmpty()) {
-                throw new InvalidTopologyException("The topology blob store map does not " +
-                        "contain the valid keys to launch the topology " + missingKeys);
+        }
+    }
+
+    /**
+     * Validate topology blobstore map.
+     * @param topoConf Topology configuration
+     * @param blobStore The BlobStore
+     * @throws InvalidTopologyException
+     * @throws AuthorizationException
+     */
+    public static void validateTopologyBlobStoreMap(Map<String, Object> topoConf, BlobStore blobStore)
+            throws InvalidTopologyException, AuthorizationException {
+        Map<String, Object> blobStoreMap = (Map<String, Object>) topoConf.get(Config.TOPOLOGY_BLOBSTORE_MAP);
+        if (blobStoreMap != null) {
+            Subject subject = ReqContext.context().subject();
+            for (String key : blobStoreMap.keySet()) {
+                try {
+                    blobStore.getBlobMeta(key, subject);
+                } catch (KeyNotFoundException keyNotFound) {
+                    // wrap KeyNotFoundException in an InvalidTopologyException
+                    throw new InvalidTopologyException("Key not found: " + keyNotFound.get_msg());
+                }
             }
         }
     }
@@ -1166,18 +1269,30 @@ public class Utils {
         return null;
     }
 
-    public static int getAvailablePort(int prefferedPort) {
+    /**
+     * Gets an available port. Consider if it is possible to pass port 0 to the
+     * server instead of using this method, since there is no guarantee that the
+     * port returned by this method will remain free.
+     *
+     * @param preferredPort
+     * @return The preferred port if available, or a random available port
+     */
+    public static int getAvailablePort(int preferredPort) {
         int localPort = -1;
-        try(ServerSocket socket = new ServerSocket(prefferedPort)) {
+        try (ServerSocket socket = new ServerSocket(preferredPort)) {
             localPort = socket.getLocalPort();
         } catch(IOException exp) {
-            if (prefferedPort > 0) {
+            if (preferredPort > 0) {
                 return getAvailablePort(0);
             }
         }
         return localPort;
     }
 
+    /**
+     * Shortcut to calling {@link #getAvailablePort(int) } with 0 as the preferred port
+     * @return A random available port
+     */
     public static int getAvailablePort() {
         return getAvailablePort(0);
     }
@@ -1205,6 +1320,18 @@ public class Utils {
             return null;
         }
         return findOne(pred, (Set<T>) map.entrySet());
+    }
+
+    public static Map<String, Object> parseJson(String json) {
+        if (json==null) {
+            return new HashMap<>();
+        } else {
+            try {
+                return (Map<String, Object>) JSONValue.parseWithException(json);
+            } catch (ParseException e) {
+                throw new RuntimeException(e);
+            }
+        }
     }
 
     // Non-static impl methods exist for mocking purposes.
@@ -1414,5 +1541,33 @@ public class Utils {
             defaultsConf.putAll(stormConf);
         }
         return defaultsConf;
+    }
+
+    public static boolean isLocalhostAddress(String address) {
+        return LOCALHOST_ADDRESSES.contains(address);
+    }
+
+    public static <K, V> Map<K, V> merge(Map<? extends K, ? extends V> first, Map<? extends K, ? extends V> other) {
+        Map<K, V> ret = new HashMap<>(first);
+        if (other != null) {
+            ret.putAll(other);
+        }
+        return ret;
+    }
+
+    public static <V> ArrayList<V> convertToArray(Map<Integer, V> srcMap, int start) {
+        Set<Integer> ids = srcMap.keySet();
+        Integer largestId = ids.stream().max(Integer::compareTo).get();
+        int end = largestId - start;
+        ArrayList<V> result = new ArrayList<>(Collections.nCopies(end+1 , null)); // creates array[largestId+1] filled with nulls
+        for( Map.Entry<Integer, V> entry : srcMap.entrySet() ) {
+            int id = entry.getKey();
+            if (id < start) {
+                LOG.debug("Entry {} will be skipped it is too small {} ...", id, start);
+            } else {
+                result.set(id - start, entry.getValue());
+            }
+        }
+        return result;
     }
 }

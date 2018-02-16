@@ -15,6 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.storm.redis.trident.state;
 
 import org.apache.storm.task.IMetricsContext;
@@ -71,7 +72,9 @@ public class RedisClusterState implements State {
         public State makeState(@SuppressWarnings("rawtypes") Map<String, Object> conf, IMetricsContext metrics, int partitionIndex, int numPartitions) {
             JedisCluster jedisCluster = new JedisCluster(jedisClusterConfig.getNodes(),
                                                     jedisClusterConfig.getTimeout(),
+                                                    jedisClusterConfig.getTimeout(),
                                                     jedisClusterConfig.getMaxRedirections(),
+                                                    jedisClusterConfig.getPassword(),
                                                     DEFAULT_POOL_CONFIG);
 
             return new RedisClusterState(jedisCluster);

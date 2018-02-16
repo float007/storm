@@ -17,7 +17,6 @@
  */
 package org.apache.storm.blobstore;
 
-import org.apache.storm.Config;
 import org.apache.storm.generated.SettableBlobMeta;
 import org.apache.storm.generated.AuthorizationException;
 import org.apache.storm.generated.KeyAlreadyExistsException;
@@ -25,6 +24,7 @@ import org.apache.storm.generated.KeyNotFoundException;
 import org.apache.storm.generated.ReadableBlobMeta;
 
 import org.apache.storm.nimbus.NimbusInfo;
+import org.apache.storm.utils.ConfigUtils;
 import org.apache.storm.utils.Utils;
 import org.apache.zookeeper.KeeperException.NoNodeException;
 import org.apache.curator.framework.CuratorFramework;
@@ -46,6 +46,8 @@ import java.util.Set;
 import static org.apache.storm.blobstore.BlobStoreAclHandler.ADMIN;
 import static org.apache.storm.blobstore.BlobStoreAclHandler.READ;
 import static org.apache.storm.blobstore.BlobStoreAclHandler.WRITE;
+
+import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Provides a local file system backed blob store implementation for Nimbus.
@@ -83,10 +85,7 @@ public class LocalFsBlobStore extends BlobStore {
         this.nimbusInfo = nimbusInfo;
         zkClient = BlobStoreUtils.createZKClient(conf);
         if (overrideBase == null) {
-            overrideBase = (String)conf.get(Config.BLOBSTORE_DIR);
-            if (overrideBase == null) {
-                overrideBase = (String) conf.get(Config.STORM_LOCAL_DIR);
-            }
+            overrideBase = ConfigUtils.absoluteStormBlobStoreDir(conf);
         }
         File baseDir = new File(overrideBase, BASE_BLOBS_DIR_NAME);
         try {
@@ -346,5 +345,10 @@ public class LocalFsBlobStore extends BlobStore {
 
     public void fullCleanup(long age) throws IOException {
         fbs.fullCleanup(age);
+    }
+    
+    @VisibleForTesting
+    File getKeyDataDir(String key) {
+        return fbs.getKeyDir(DATA_PREFIX + key);
     }
 }

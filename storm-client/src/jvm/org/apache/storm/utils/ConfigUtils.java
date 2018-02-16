@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,19 +18,26 @@
 
 package org.apache.storm.utils;
 
+import java.io.File;
+import java.io.IOException;
+import java.net.URLEncoder;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
+import java.util.function.BooleanSupplier;
+
 import org.apache.commons.io.FileUtils;
 import org.apache.storm.Config;
 import org.apache.storm.daemon.supervisor.AdvancedFSOps;
 import org.apache.storm.generated.StormTopology;
 import org.apache.storm.validation.ConfigValidation;
 
-import java.io.File;
-import java.io.IOException;
-import java.net.URLEncoder;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Random;
-import java.util.concurrent.Callable;
 
 public class ConfigUtils {
     public static final String FILE_SEPARATOR = File.separator;
@@ -65,6 +72,32 @@ public class ConfigUtils {
             throw new IllegalArgumentException("Illegal cluster mode in conf: " + mode);
         }
         return true;
+    }
+
+    /**
+     * Returns a Collection of file names found under the given directory.
+     * @param dir a directory
+     * @return the Collection of file names
+     */
+    public static Collection<String> readDirContents(String dir) {
+        Collection<File> ret = readDirFiles(dir);
+        return ret.stream().map(car -> car.getName()).collect(Collectors.toList());
+    }
+
+    /**
+     * Returns a Collection of files found under the given directory.
+     * @param dir a directory
+     * @return the Collection of file names
+     */
+    public static Collection<File> readDirFiles(String dir) {
+        Collection<File> ret = new HashSet<>();
+        File[] files = new File(dir).listFiles();
+        if (files != null) {
+            for (File f: files) {
+                ret.add(f);
+            }
+        }
+        return ret;
     }
 
     // we use this "weird" wrapper pattern temporarily for mocking in clojure test
@@ -112,19 +145,19 @@ public class ConfigUtils {
         throw new IllegalArgumentException("Illegal topology.stats.sample.rate in conf: " + rate);
     }
 
-    public static Callable<Boolean> mkStatsSampler(Map<String, Object> conf) {
+    public static BooleanSupplier mkStatsSampler(Map<String, Object> conf) {
         return evenSampler(samplingRate(conf));
     }
 
-    public static Callable<Boolean> evenSampler(final int samplingFreq) {
+    public static BooleanSupplier evenSampler(final int samplingFreq) {
         final Random random = new Random();
 
-        return new Callable<Boolean>() {
+        return new BooleanSupplier() {
             private int curr = -1;
             private int target = random.nextInt(samplingFreq);
 
             @Override
-            public Boolean call() throws Exception {
+            public boolean getAsBoolean() {
                 curr++;
                 if (curr >= samplingFreq) {
                     curr = 0;
@@ -184,6 +217,20 @@ public class ConfigUtils {
         }
     }
 
+    public static String absoluteStormBlobStoreDir(Map<String, Object> conf) {
+        String blobStoreDir = (String) conf.get(Config.BLOBSTORE_DIR);
+        if (blobStoreDir == null) {
+            return ConfigUtils.absoluteStormLocalDir(conf);
+        } else {
+            if (new File(blobStoreDir).isAbsolute()) {
+                return blobStoreDir;
+            } else {
+                String stormHome = System.getProperty("storm.home");
+                return (stormHome + FILE_SEPARATOR + blobStoreDir);
+            }
+        }
+    }
+
     public static StormTopology readSupervisorStormCodeGivenPath(String stormCodePath, AdvancedFSOps ops) throws IOException {
         return Utils.deserialize(ops.slurp(new File(stormCodePath)), StormTopology.class);
     }
@@ -227,7 +274,7 @@ public class ConfigUtils {
     public static Map overrideLoginConfigWithSystemProperty(Map<String, Object> conf) { // note that we delete the return value
         String loginConfFile = System.getProperty("java.security.auth.login.config");
         if (loginConfFile != null) {
-             conf.put("java.security.auth.login.config", loginConfFile);
+            conf.put("java.security.auth.login.config", loginConfFile);
         }
         return conf;
     }
@@ -313,6 +360,33 @@ public class ConfigUtils {
         return new File((logRoot + FILE_SEPARATOR + id + FILE_SEPARATOR + port));
     }
 
+    /**
+     * Get the given config value as a List &lt;String&gt;, if possible.
+     * @param name - the config key
+     * @param conf - the config map
+     * @return - the config value converted to a List &lt;String&gt; if found, otherwise null.
+     * @throws IllegalArgumentException if conf is null
+     * @throws NullPointerException if name is null and the conf map doesn't support null keys
+     */
+    public static List<String> getValueAsList(String name, Map<String, Object> conf) {
+        if (null == conf) {
+            throw new IllegalArgumentException("Conf is required");
+        }
+        Object value = conf.get(name);
+        List<String> listValue;
+        if (value == null) {
+            listValue = null;
+        } else if (value instanceof Collection) {
+            listValue = ((Collection<?>) value)
+                    .stream()
+                    .map(ObjectReader::getString)
+                    .collect(Collectors.toList());
+        } else {
+            listValue = Arrays.asList(ObjectReader.getString(value).split("\\s+"));
+        }
+        return listValue;
+    }
+
     public StormTopology readSupervisorTopologyImpl(Map<String, Object> conf, String stormId, AdvancedFSOps ops) throws IOException {
         String stormRoot = supervisorStormDistRoot(conf, stormId);
         String topologyPath = supervisorStormCodePath(stormRoot);
@@ -361,5 +435,4 @@ public class ConfigUtils {
         FileUtils.forceMkdir(new File(ret));
         return ret;
     }
-
 }

@@ -15,6 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.storm.daemon.drpc;
 
 import static org.junit.Assert.assertEquals;
@@ -89,9 +90,9 @@ public class DRPCServerTest {
         Map<String, Object> conf = getConf(0, 0, null);
         try (DRPCServer server = new DRPCServer(conf)) {
             server.start();
-            try (DRPCClient client = new DRPCClient(conf, "localhost", server.getDRPCPort());
-                 DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDRPCInvokePort())) {
-                Future<String> found = exec.submit(() -> client.getClient().execute("testing", "test"));
+            try (DRPCClient client = new DRPCClient(conf, "localhost", server.getDrpcPort());
+                DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDrpcInvokePort())) {
+                final Future<String> found = exec.submit(() -> client.getClient().execute("testing", "test"));
                 DRPCRequest request = getNextAvailableRequest(invoke, "testing");
                 assertNotNull(request);
                 assertEquals("test", request.get_func_args());
@@ -108,8 +109,8 @@ public class DRPCServerTest {
         Map<String, Object> conf = getConf(0, 0, null);
         try (DRPCServer server = new DRPCServer(conf)) {
             server.start();
-            try (DRPCClient client = new DRPCClient(conf, "localhost", server.getDRPCPort());
-                    DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDRPCInvokePort())) {
+            try (DRPCClient client = new DRPCClient(conf, "localhost", server.getDrpcPort());
+                    DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDrpcInvokePort())) {
                 Future<String> found = exec.submit(() -> client.getClient().execute("testing", "test"));
                 DRPCRequest request = getNextAvailableRequest(invoke, "testing");
                 assertNotNull(request);
@@ -129,9 +130,9 @@ public class DRPCServerTest {
         }
     }
     
-    public static String GET(int port, String func, String args) {
+    private static String doGet(int port, String func, String args) {
         try {
-            URL url = new URL("http://localhost:"+port+"/drpc/"+func+"/"+args);
+            URL url = new URL("http://localhost:" + port + "/drpc/" + func + "/" + args);
             InputStream in = url.openStream();
             byte[] buffer = new byte[1024];
             int read = in.read(buffer);
@@ -149,8 +150,8 @@ public class DRPCServerTest {
             server.start();
             //TODO need a better way to do this
             Thread.sleep(2000);
-            try (DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDRPCInvokePort())) {
-                Future<String> found = exec.submit(() -> GET(server.getHttpServerPort(), "testing", "test"));
+            try (DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDrpcInvokePort())) {
+                final Future<String> found = exec.submit(() -> doGet(server.getHttpServerPort(), "testing", "test"));
                 DRPCRequest request = getNextAvailableRequest(invoke, "testing");
                 assertNotNull(request);
                 assertEquals("test", request.get_func_args());
@@ -170,8 +171,8 @@ public class DRPCServerTest {
             server.start();
             //TODO need a better way to do this
             Thread.sleep(2000);
-            try (DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDRPCInvokePort())) {
-                Future<String> found = exec.submit(() -> GET(server.getHttpServerPort(), "testing", "test"));
+            try (DRPCInvocationsClient invoke = new DRPCInvocationsClient(conf, "localhost", server.getDrpcInvokePort())) {
+                Future<String> found = exec.submit(() -> doGet(server.getHttpServerPort(), "testing", "test"));
                 DRPCRequest request = getNextAvailableRequest(invoke, "testing");
                 assertNotNull(request);
                 assertEquals("test", request.get_func_args());

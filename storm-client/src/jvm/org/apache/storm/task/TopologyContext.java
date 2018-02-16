@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -32,7 +32,6 @@ import org.apache.storm.tuple.Fields;
 import org.apache.storm.utils.Utils;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -57,13 +56,15 @@ public class TopologyContext extends WorkerTopologyContext implements IMetricsCo
     private Map<String, Object> _executorData;
     private Map<Integer,Map<Integer, Map<String, IMetric>>> _registeredMetrics;
     private AtomicBoolean _openOrPrepareWasCalled;
-
+    // This is updated by the Worker and the topology has shared access to it
+    private Map<String, Long> blobToLastKnownVersion;
 
     public TopologyContext(StormTopology topology,
                            Map<String, Object> topoConf,
                            Map<Integer, String> taskToComponent,
                            Map<String, List<Integer>> componentToSortedTasks,
                            Map<String, Map<String, Fields>> componentToStreamToFields,
+                           Map<String, Long> blobToLastKnownVersionShared,
                            String stormId,
                            String codeDir,
                            String pidDir,
@@ -82,6 +83,7 @@ public class TopologyContext extends WorkerTopologyContext implements IMetricsCo
         _executorData = executorData;
         _registeredMetrics = registeredMetrics;
         _openOrPrepareWasCalled = openOrPrepareWasCalled;
+        blobToLastKnownVersion = blobToLastKnownVersionShared;
     }
 
 
@@ -142,6 +144,10 @@ public class TopologyContext extends WorkerTopologyContext implements IMetricsCo
      */
     public <T extends ISubscribedState> T setSubscribedState(String componentId, String streamId, T obj) {
         throw new NotImplementedException();
+    }
+
+    public Map<String, Long> getBlobToLastKnownVersion() {
+        return blobToLastKnownVersion;
     }
 
     /**
@@ -265,7 +271,7 @@ public class TopologyContext extends WorkerTopologyContext implements IMetricsCo
         _hooks.add(hook);
     }
 
-    public Collection<ITaskHook> getHooks() {
+    public List<ITaskHook> getHooks() {
         return _hooks;
     }
 

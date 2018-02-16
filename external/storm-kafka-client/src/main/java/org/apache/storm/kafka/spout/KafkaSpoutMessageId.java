@@ -18,18 +18,19 @@
 
 package org.apache.storm.kafka.spout;
 
+import java.io.Serializable;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 
-public class KafkaSpoutMessageId {
-    private final transient TopicPartition topicPart;
-    private final transient long offset;
-    private transient int numFails = 0;
+public class KafkaSpoutMessageId implements Serializable {
+    private final TopicPartition topicPart;
+    private final long offset;
+    private int numFails = 0;
     /**
      * true if the record was emitted using a form of collector.emit(...). false
      * when skipping null tuples as configured by the user in KafkaSpoutConfig
      */
-    private boolean emitted;   
+    private boolean emitted;
 
     public KafkaSpoutMessageId(ConsumerRecord<?, ?> consumerRecord) {
         this(consumerRecord, true);
@@ -87,27 +88,14 @@ public class KafkaSpoutMessageId {
         this.emitted = emitted;
     }
 
-    /**
-     * Gets metadata for this message which may be committed to Kafka.
-     * @param currThread The calling thread
-     * @return The metadata
-     */
-    public String getMetadata(Thread currThread) {
-        return "{"
-                + "topic-partition=" + topicPart
-                + ", offset=" + offset
-                + ", numFails=" + numFails
-                + ", thread='" + currThread.getName() + "'"
-                + '}';
-    }
-
     @Override
     public String toString() {
         return "{"
-                + "topic-partition=" + topicPart
-                + ", offset=" + offset
-                + ", numFails=" + numFails
-                + '}';
+            + "topic-partition=" + topicPart
+            + ", offset=" + offset
+            + ", numFails=" + numFails
+            + ", emitted=" + emitted
+            + '}';
     }
 
     @Override
