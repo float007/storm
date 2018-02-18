@@ -39,6 +39,7 @@ import java.io.ObjectInputStream;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -69,18 +70,18 @@ public abstract class AbstractAutoCreds implements IAutoCredentials, ICredential
     }
 
     @Override
-    public void populateCredentials(Map<String, String> credentials, Map conf) {
+    public void populateCredentials(Map<String, String> credentials, Map<String, Object> topoConf, final String topologyOwnerPrincipal) {
         try {
-            loadConfigKeys(conf);
-            if (!configKeys.isEmpty()) {
-                Map<String, Object> updatedConf = updateConfigs(conf);
-                for (String configKey : configKeys) {
+            List<String> loadedKeys = loadConfigKeys(topoConf);
+            if (!loadedKeys.isEmpty()) {
+                Map<String, Object> updatedConf = updateConfigs(topoConf);
+                for (String configKey : loadedKeys) {
                     credentials.put(getCredentialKey(configKey),
-                            DatatypeConverter.printBase64Binary(getHadoopCredentials(updatedConf, configKey)));
+                            DatatypeConverter.printBase64Binary(getHadoopCredentials(updatedConf, configKey, topologyOwnerPrincipal)));
                 }
             } else {
                 credentials.put(getCredentialKey(StringUtils.EMPTY),
-                        DatatypeConverter.printBase64Binary(getHadoopCredentials(conf)));
+                        DatatypeConverter.printBase64Binary(getHadoopCredentials(topoConf, topologyOwnerPrincipal)));
             }
             LOG.info("Tokens added to credentials map.");
         } catch (Exception e) {
@@ -99,8 +100,8 @@ public abstract class AbstractAutoCreds implements IAutoCredentials, ICredential
     }
 
     @Override
-    public void renew(Map<String, String> credentials, Map topologyConf) {
-        doRenew(credentials, updateConfigs(topologyConf));
+    public void renew(Map<String, String> credentials, Map<String, Object> topologyConf, String ownerPrincipal) {
+        doRenew(credentials, updateConfigs(topologyConf), ownerPrincipal);
     }
 
     @Override
@@ -187,11 +188,11 @@ public abstract class AbstractAutoCreds implements IAutoCredentials, ICredential
      */
     protected abstract String getCredentialKey(String configKey);
 
-    protected abstract byte[] getHadoopCredentials(Map conf, String configKey);
+    protected abstract byte[] getHadoopCredentials(Map<String, Object> conf, String configKey, final String topologyOwnerPrincipal);
 
-    protected abstract byte[] getHadoopCredentials(Map conf);
+    protected abstract byte[] getHadoopCredentials(Map<String, Object> conf, final String topologyOwnerPrincipal);
 
-    protected abstract void doRenew(Map<String, String> credentials, Map topologyConf);
+    protected abstract void doRenew(Map<String, String> credentials, Map<String, Object> topologyConf, String ownerPrincipal);
 
     @SuppressWarnings("unchecked")
     private void addCredentialToSubject(Subject subject, Map<String, String> credentials) {
@@ -214,6 +215,21 @@ public abstract class AbstractAutoCreds implements IAutoCredentials, ICredential
                     if (allTokens != null) {
                         for (Token<? extends TokenIdentifier> token : allTokens) {
                             try {
+
+                                if (token == null) {
+                                    LOG.debug("Ignoring null token");
+                                    continue;
+                                }
+
+                                LOG.debug("Current user: {}", UserGroupInformation.getCurrentUser());
+                                LOG.debug("Token from Credentials : {}", token);
+
+                                TokenIdentifier tokenId = token.decodeIdentifier();
+                                if (tokenId != null) {
+                                    LOG.debug("Token identifier : {}", tokenId);
+                                    LOG.debug("Username in token identifier : {}", tokenId.getUser());
+                                }
+
                                 UserGroupInformation.getCurrentUser().addToken(token);
                                 LOG.info("Added delegation tokens to UGI.");
                             } catch (IOException e) {
@@ -243,12 +259,15 @@ public abstract class AbstractAutoCreds implements IAutoCredentials, ICredential
 
     }
 
-    private void loadConfigKeys(Map conf) {
+    private List<String> loadConfigKeys(Map conf) {
         List<String> keys;
-        String configKeyString = getConfigKeyString();
-        if ((keys = (List<String>) conf.get(configKeyString)) != null) {
+        if ((keys = (List<String>) conf.get(getConfigKeyString())) != null) {
             configKeys.addAll(keys);
+        } else {
+            keys = Collections.emptyList();
         }
+
+        return keys;
     }
 
 }

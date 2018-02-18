@@ -17,6 +17,7 @@
  */
 package org.apache.storm.blobstore;
 
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.storm.Config;
 import org.apache.storm.generated.AuthorizationException;
@@ -49,6 +50,10 @@ public class BlobStoreUtils {
     private static final String BLOBSTORE_SUBTREE="/blobstore";
     private static final String BLOB_DEPENDENCIES_PREFIX = "dep-";
     private static final Logger LOG = LoggerFactory.getLogger(BlobStoreUtils.class);
+
+    public static String getBlobStoreSubtree() {
+        return BLOBSTORE_SUBTREE;
+    }
 
     public static CuratorFramework createZKClient(Map conf) {
         List<String> zkServers = (List<String>) conf.get(Config.STORM_ZOOKEEPER_SERVERS);
@@ -159,7 +164,7 @@ public class BlobStoreUtils {
         }
 
         if (!isSuccess) {
-            LOG.error("Could not download blob with key" + key);
+            LOG.error("Could not download blob with key {}", key);
         }
         return isSuccess;
     }
@@ -204,7 +209,7 @@ public class BlobStoreUtils {
         }
 
         if (!isSuccess) {
-            LOG.error("Could not update the blob with key" + key);
+            LOG.error("Could not update the blob with key {}", key);
         }
         return isSuccess;
     }
@@ -245,6 +250,9 @@ public class BlobStoreUtils {
                 return;
             }
             stateInfo = zkClient.getChildren().forPath(BLOBSTORE_SUBTREE + "/" + key);
+            if (CollectionUtils.isEmpty(stateInfo)) {
+                return;
+            }
             LOG.debug("StateInfo for update {}", stateInfo);
             Set<NimbusInfo> nimbusInfoList = getNimbodesWithLatestSequenceNumberOfBlob(zkClient, key);
 
@@ -281,6 +289,4 @@ public class BlobStoreUtils {
         }
         return fileName;
     }
-
-
 }

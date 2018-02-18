@@ -35,6 +35,8 @@
   (:import [org.apache.storm.metric.api IMetric IMetricsConsumer$TaskInfo IMetricsConsumer$DataPoint StateMetric])
   (:import [org.apache.storm Config Constants])
   (:import [org.apache.storm.cluster ClusterStateContext DaemonType])
+  (:import [org.apache.storm.metrics2 StormMetricRegistry TaskMetrics])
+  (:import [com.codahale.metrics Meter Counter])
   (:import [org.apache.storm.grouping LoadAwareCustomStreamGrouping LoadAwareShuffleGrouping LoadMapping ShuffleGrouping])
   (:import [java.util.concurrent ConcurrentLinkedQueue])
   (:require [org.apache.storm [thrift :as thrift]
@@ -231,7 +233,10 @@
                                   (str "executor"  executor-id "-send-queue")
                                   (storm-conf TOPOLOGY-EXECUTOR-SEND-BUFFER-SIZE)
                                   (storm-conf TOPOLOGY-DISRUPTOR-WAIT-TIMEOUT-MILLIS)
-                                  :producer-type :single-threaded
+                                  (.getStormId worker-context)
+                                  (first task-ids) component-id
+                                  (.getThisWorkerPort worker-context)
+                                  :producer-type :multi-threaded
                                   :batch-size (storm-conf TOPOLOGY-DISRUPTOR-BATCH-SIZE)
                                   :batch-timeout (storm-conf TOPOLOGY-DISRUPTOR-BATCH-TIMEOUT-MILLIS))
         ]
@@ -252,7 +257,7 @@
      :batch-transfer-queue batch-transfer->worker
      :transfer-fn (mk-executor-transfer-fn batch-transfer->worker storm-conf)
      :suicide-fn (:suicide-fn worker)
-     :storm-cluster-state (cluster/mk-storm-cluster-state (:cluster-state worker) 
+     :storm-cluster-state (cluster/mk-storm-cluster-state (:cluster-state worker)
                                                           :acls (Utils/getWorkerACL storm-conf)
                                                           :context (ClusterStateContext. DaemonType/WORKER))
      :type executor-type
@@ -275,7 +280,7 @@
                                (log-message "Got interrupted excpetion shutting thread down...")
                                ((:suicide-fn <>))))
      :sampler (mk-stats-sampler storm-conf)
-     :spout-throttling-metrics (if (= executor-type :spout) 
+     :spout-throttling-metrics (if (= executor-type :spout)
                                 (builtin-metrics/make-spout-throttling-data)
                                 nil)
      ;; TODO: add in the executor-specific stuff in a :specific... or make a spout-data, bolt-data function?
@@ -345,21 +350,24 @@
      (when (seq data-points)
        (task/send-unanchored task-data Constants/METRICS_STREAM_ID [task-info data-points]))))
 
-(defn setup-ticks! [worker executor-data]
+(defn setup-ticks! [executor-data]
   (let [storm-conf (:storm-conf executor-data)
+        comp-id (:component-id executor-data)
         tick-time-secs (storm-conf TOPOLOGY-TICK-TUPLE-FREQ-SECS)
         receive-queue (:receive-queue executor-data)
         context (:worker-context executor-data)]
     (when tick-time-secs
-      (if (or (Utils/isSystemId (:component-id executor-data))
+      (if (or (and (not= "__acker" comp-id) (Utils/isSystemId comp-id))
               (and (= false (storm-conf TOPOLOGY-ENABLE-MESSAGE-TIMEOUTS))
                    (= :spout (:type executor-data))))
-        (log-message "Timeouts disabled for executor " (:component-id executor-data) ":" (:executor-id executor-data))
+        (log-message "Timeouts disabled for executor " comp-id ":" (:executor-id executor-data))
         (schedule-recurring
-          (:user-timer worker)
+          (:user-timer (:worker executor-data))
           tick-time-secs
           tick-time-secs
           (fn []
+            ;; We should create a new tick tuple for each recurrence instead of sharing object
+            ;; More detail on https://issues.apache.org/jira/browse/STORM-2912
             (let [val [(AddressedTuple. AddressedTuple/BROADCAST_DEST (TupleImpl. context [tick-time-secs] Constants/SYSTEM_TASK_ID Constants/SYSTEM_TICK_STREAM_ID))]]
               (disruptor/publish receive-queue val))))))))
 
@@ -382,14 +390,13 @@
               (.setLowWaterMark ((:storm-conf executor-data) BACKPRESSURE-DISRUPTOR-LOW-WATERMARK))
               (.setEnableBackpressure ((:storm-conf executor-data) TOPOLOGY-BACKPRESSURE-ENABLE)))
 
-        ;; starting the batch-transfer->worker ensures that anything publishing to that queue 
+        ;; starting the batch-transfer->worker ensures that anything publishing to that queue
         ;; doesn't block (because it's a single threaded queue and the caching/consumer started
         ;; trick isn't thread-safe)
         system-threads [(start-batch-transfer->worker-handler! worker executor-data)]
         handlers (with-error-reaction report-error-and-die
                    (mk-threads executor-data task-datas initial-credentials))
-        threads (concat handlers system-threads)]    
-    (setup-ticks! worker executor-data)
+        threads (concat handlers system-threads)]
 
     (log-message "Finished loading executor " component-id ":" (pr-str executor-id))
     ;; TODO: add method here to get rendered stats... have worker call that when heartbeating
@@ -436,7 +443,7 @@
     (.fail spout msg-id)
     (task/apply-hooks (:user-context task-data) .spoutFail (SpoutFailInfo. msg-id task-id time-delta))
     (when time-delta
-      (stats/spout-failed-tuple! (:stats executor-data) (:stream tuple-info) time-delta))))
+      (stats/spout-failed-tuple! (:stats executor-data)  (.getFailed ^TaskMetrics (:task-metrics task-data) (:stream tuple-info)) (:stream tuple-info) time-delta))))
 
 (defn- ack-spout-msg [executor-data task-data msg-id tuple-info time-delta id debug?]
   (let [^ISpout spout (:object task-data)
@@ -445,7 +452,7 @@
     (.ack spout msg-id)
     (task/apply-hooks (:user-context task-data) .spoutAck (SpoutAckInfo. msg-id task-id time-delta))
     (when time-delta
-      (stats/spout-acked-tuple! (:stats executor-data) (:stream tuple-info) time-delta))))
+      (stats/spout-acked-tuple! (:stats executor-data) (.getAcked ^TaskMetrics (:task-metrics task-data) (:stream tuple-info)) (:stream tuple-info) time-delta))))
 
 (defn mk-task-receiver [executor-data tuple-action-fn]
   (let [task-ids (:task-ids executor-data)
@@ -619,6 +626,7 @@
                       )))))
         (reset! open-or-prepare-was-called? true) 
         (log-message "Opened spout " component-id ":" (keys task-datas))
+        (setup-ticks! executor-data)
         (setup-metrics! executor-data)
         
         (fn []
@@ -672,12 +680,14 @@
 (defn- tuple-time-delta! [^TupleImpl tuple]
   (let [ms (.getProcessSampleStartTime tuple)]
     (if ms
-      (time-delta-ms ms))))
+      (time-delta-ms ms)
+      -1)))
       
 (defn- tuple-execute-time-delta! [^TupleImpl tuple]
   (let [ms (.getExecuteSampleStartTime tuple)]
     (if ms
-      (time-delta-ms ms))))
+      (time-delta-ms ms)
+      -1)))
 
 (defn put-xor! [^Map pending key id]
   (let [curr (or (.get pending key) (long 0))]
@@ -732,7 +742,7 @@
                                     (log-message "Execute done TUPLE " tuple " TASK: " task-id " DELTA: " delta))
  
                                   (task/apply-hooks user-context .boltExecute (BoltExecuteInfo. tuple task-id delta))
-                                  (when delta
+                                  (when (<= 0 delta)
                                     (stats/bolt-execute-tuple! executor-stats
                                                                (.getSourceComponent tuple)
                                                                (.getSourceStreamId tuple)
@@ -810,8 +820,9 @@
                            (when debug? 
                              (log-message "BOLT ack TASK: " task-id " TIME: " delta " TUPLE: " tuple))
                            (task/apply-hooks user-context .boltAck (BoltAckInfo. tuple task-id delta))
-                           (when delta
+                           (when (<= 0 delta)
                              (stats/bolt-acked-tuple! executor-stats
+                                                      (.getAcked ^TaskMetrics (:task-metrics task-data) (.getSourceStreamId tuple))
                                                       (.getSourceComponent tuple)
                                                       (.getSourceStreamId tuple)
                                                       delta))))
@@ -825,8 +836,9 @@
                            (when debug? 
                              (log-message "BOLT fail TASK: " task-id " TIME: " delta " TUPLE: " tuple))
                            (task/apply-hooks user-context .boltFail (BoltFailInfo. tuple task-id delta))
-                           (when delta
+                           (when (<= 0 delta)
                              (stats/bolt-failed-tuple! executor-stats
+                                                       (.getFailed ^TaskMetrics (:task-metrics task-data) (.getSourceStreamId tuple))
                                                        (.getSourceComponent tuple)
                                                        (.getSourceStreamId tuple)
                                                        delta))))
@@ -840,6 +852,7 @@
                          )))))
         (reset! open-or-prepare-was-called? true)        
         (log-message "Prepared bolt " component-id ":" (keys task-datas))
+        (setup-ticks! executor-data)
         (setup-metrics! executor-data)
 
         (let [receive-queue (:receive-queue executor-data)

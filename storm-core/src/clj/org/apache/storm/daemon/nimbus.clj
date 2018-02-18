@@ -16,6 +16,7 @@
 (ns org.apache.storm.daemon.nimbus
   (:import [org.apache.thrift.server THsHaServer THsHaServer$Args])
   (:import [org.apache.storm.generated KeyNotFoundException])
+  (:import [org.apache.storm.security INimbusCredentialPlugin])
   (:import [org.apache.storm.blobstore LocalFsBlobStore])
   (:import [org.apache.thrift.protocol TBinaryProtocol TBinaryProtocol$Factory])
   (:import [org.apache.thrift.exception])
@@ -132,6 +133,13 @@
     scheduler
     ))
 
+(defn mk-zk-client [conf]
+  (let [zk-servers (conf STORM-ZOOKEEPER-SERVERS)
+        zk-port (conf STORM-ZOOKEEPER-PORT)
+        zk-root (conf STORM-ZOOKEEPER-ROOT)]
+    (if (and zk-servers zk-port)
+      (mk-client conf zk-servers zk-port :root zk-root :auth-conf conf))))
+
 (defmulti blob-sync cluster-mode)
 
 (defnk is-leader [nimbus :throw-exception true]
@@ -182,7 +190,8 @@
 
 (defn nimbus-data [conf inimbus]
   (let [forced-scheduler (.getForcedScheduler inimbus)
-        blob-store (Utils/getNimbusBlobStore conf (NimbusInfo/fromConf conf))]
+        blob-store (Utils/getNimbusBlobStore conf (NimbusInfo/fromConf conf))
+        zk-client (mk-zk-client conf)]
     {:conf conf
      :nimbus-host-port-info (NimbusInfo/fromConf conf)
      :inimbus inimbus
@@ -212,7 +221,8 @@
                                  (exit-process! 20 "Error when processing an event")
                                  ))
      :scheduler (mk-scheduler conf inimbus)
-     :leader-elector (zk-leader-elector conf blob-store)
+     :zk-client zk-client
+     :leader-elector (zk-leader-elector conf zk-client blob-store)
      :id->sched-status (atom {})
      :node-id->resources (atom {}) ;;resources of supervisors
      :id->resources (atom {}) ;;resources of topologies
@@ -451,9 +461,9 @@
               supervisor-ids))
        )))
 
-(defn- get-version-for-key [key nimbus-host-port-info conf]
+(defn- get-version-for-key [key nimbus-host-port-info zk-client]
   (let [version (KeySequenceNumber. key nimbus-host-port-info)]
-    (.getKeySequenceNumber version conf)))
+    (.getKeySequenceNumber version zk-client)))
 
 (defn get-key-seq-from-blob-store [blob-store]
   (let [key-iter (.listKeys blob-store)]
@@ -463,6 +473,7 @@
   (let [subject (get-subject)
         storm-cluster-state (:storm-cluster-state nimbus)
         blob-store (:blob-store nimbus)
+        zk-client (:zk-client nimbus)
         jar-key (master-stormjar-key storm-id)
         code-key (master-stormcode-key storm-id)
         conf-key (master-stormconf-key storm-id)
@@ -470,13 +481,13 @@
     (when tmp-jar-location ;;in local mode there is no jar
       (.createBlob blob-store jar-key (FileInputStream. tmp-jar-location) (SettableBlobMeta. BlobStoreAclHandler/DEFAULT) subject)
       (if (instance? LocalFsBlobStore blob-store)
-        (.setup-blobstore! storm-cluster-state jar-key nimbus-host-port-info (get-version-for-key jar-key nimbus-host-port-info conf))))
+        (.setup-blobstore! storm-cluster-state jar-key nimbus-host-port-info (get-version-for-key jar-key nimbus-host-port-info zk-client))))
     (.createBlob blob-store conf-key (Utils/toCompressedJsonConf storm-conf) (SettableBlobMeta. BlobStoreAclHandler/DEFAULT) subject)
     (if (instance? LocalFsBlobStore blob-store)
-      (.setup-blobstore! storm-cluster-state conf-key nimbus-host-port-info (get-version-for-key conf-key nimbus-host-port-info conf)))
+      (.setup-blobstore! storm-cluster-state conf-key nimbus-host-port-info (get-version-for-key conf-key nimbus-host-port-info zk-client)))
     (.createBlob blob-store code-key (Utils/serialize topology) (SettableBlobMeta. BlobStoreAclHandler/DEFAULT) subject)
     (if (instance? LocalFsBlobStore blob-store)
-      (.setup-blobstore! storm-cluster-state code-key nimbus-host-port-info (get-version-for-key code-key nimbus-host-port-info conf)))))
+      (.setup-blobstore! storm-cluster-state code-key nimbus-host-port-info (get-version-for-key code-key nimbus-host-port-info zk-client)))))
 
 (defn- read-storm-topology [storm-id blob-store]
   (Utils/deserialize
@@ -540,12 +551,23 @@
     (Utils/fromCompressedJsonConf
       (.readBlob blob-store (master-stormconf-key storm-id) nimbus-subject))))
 
+(defn fixup-storm-base
+  [storm-base topo-conf]
+  (assoc storm-base
+         :owner (.get topo-conf TOPOLOGY-SUBMITTER-USER)
+         :principal (.get topo-conf TOPOLOGY-SUBMITTER-PRINCIPAL)))
+
 (defn read-topology-details [nimbus storm-id]
   (let [blob-store (:blob-store nimbus)
         storm-base (or
                      (.storm-base (:storm-cluster-state nimbus) storm-id nil)
                      (throw (NotAliveException. storm-id)))
         topology-conf (read-storm-conf-as-nimbus storm-id blob-store)
+        storm-base (if (nil? (:principal storm-base))
+                      (let [new-sb (fixup-storm-base storm-base topology-conf)]
+                        (.update-storm! (:storm-cluster-state nimbus) storm-id new-sb)
+                        new-sb)
+                      storm-base)
         topology (read-storm-topology-as-nimbus storm-id blob-store)
         executor->component (->> (compute-executor->component nimbus storm-id)
                                  (map-key (fn [[start-task end-task]]
@@ -555,7 +577,8 @@
                       topology
                       (:num-workers storm-base)
                       executor->component
-                      (:launch-time-secs storm-base))))
+                      (:launch-time-secs storm-base)
+                      (:owner storm-base))))
 
 ;; Does not assume that clocks are synchronized. Executor heartbeat is only used so that
 ;; nimbus knows when it's received a new heartbeat. All timing is done by nimbus and
@@ -959,6 +982,11 @@
 (defn- to-worker-slot [[node port]]
   (WorkerSlot. node port))
 
+(defn- fixup-assignment
+  [assignment td]
+  (assoc assignment
+         :owner (.getTopologySubmitter td)))
+
 ;; get existing assignment (just the executor->node+port map) -> default to {}
 ;; filter out ones which have a executor timeout
 ;; figure out available slots on cluster. add to that the used valid slots to get total slots. figure out how many executors should be in each slot (e.g., 4, 4, 4, 5)
@@ -970,9 +998,9 @@
         storm-cluster-state (:storm-cluster-state nimbus)
         ^INimbus inimbus (:inimbus nimbus)
         ;; read all the topologies
-        topologies (locking (:submit-lock nimbus) (into {} (for [tid (.active-storms storm-cluster-state)]
+        tds (locking (:submit-lock nimbus) (into {} (for [tid (.active-storms storm-cluster-state)]
                               {tid (read-topology-details nimbus tid)})))
-        topologies (Topologies. topologies)
+        topologies (Topologies. tds)
         ;; read all the assignments
         assigned-topology-ids (.assignments storm-cluster-state nil)
         existing-assignments (into {} (for [tid assigned-topology-ids]
@@ -980,7 +1008,14 @@
                                         ;; we exclude its assignment, meaning that all the slots occupied by its assignment
                                         ;; will be treated as free slot in the scheduler code.
                                         (when (or (nil? scratch-topology-id) (not= tid scratch-topology-id))
-                                          {tid (.assignment-info storm-cluster-state tid nil)})))]
+                                          (let [assignment (.assignment-info storm-cluster-state tid nil)
+                                                td (.get tds tid)
+                                                assignment (if (and (not (:owner assignment)) (not (nil? td)))
+                                                             (let [new-assignment (fixup-assignment assignment td)]
+                                                               (.set-assignment! storm-cluster-state tid new-assignment)
+                                                               new-assignment)
+                                                             assignment)]
+                                            {tid assignment}))))]
       ;; make the new assignments for topologies
       (locking (:sched-lock nimbus) (let [
           new-scheduler-assignments (compute-new-scheduler-assignments
@@ -1019,7 +1054,8 @@
                                                    (select-keys all-node->host all-nodes)
                                                    executor->node+port
                                                    start-times
-                                                   worker->resources)}))]
+                                                   worker->resources
+                                                   (.getTopologySubmitter (.get tds topology-id)))}))]
 
         (when (not= new-assignments existing-assignments)
           (log-debug "RESETTING id->resources and id->worker-resources cache!")
@@ -1052,7 +1088,7 @@
         (catch Exception e
         (log-warn-error e "Ignoring exception from Topology action notifier for storm-Id " storm-id))))))
 
-(defn- start-storm [nimbus storm-name storm-id topology-initial-status]
+(defn- start-storm [nimbus storm-name storm-id topology-initial-status owner principal]
   {:pre [(#{:active :inactive} topology-initial-status)]}
   (let [storm-cluster-state (:storm-cluster-state nimbus)
         conf (:conf nimbus)
@@ -1068,17 +1104,12 @@
                                   {:type topology-initial-status}
                                   (storm-conf TOPOLOGY-WORKERS)
                                   num-executors
-                                  (storm-conf TOPOLOGY-SUBMITTER-USER)
+                                  owner
                                   nil
                                   nil
-                                  {}))
+                                  {}
+                                  principal))
     (notify-topology-action-listener nimbus storm-name "activate")))
-
-;; Master:
-;; job submit:
-;; 1. read which nodes are available
-;; 2. set assignments
-;; 3. start storm - necessary in case master goes down, when goes back up can remember to take down the storm (2 states: on or off)
 
 (defn storm-active? [storm-cluster-state storm-name]
   (not-nil? (get-storm-id storm-cluster-state storm-name)))
@@ -1094,7 +1125,7 @@
 
 (defn try-read-storm-conf [conf storm-id blob-store]
   (try-cause
-    (read-storm-conf-as-nimbus conf storm-id blob-store)
+    (read-storm-conf-as-nimbus storm-id blob-store)
     (catch KeyNotFoundException e
        (throw (NotAliveException. (str storm-id))))))
 
@@ -1286,6 +1317,7 @@
   "Sets up blobstore state for all current keys."
   (let [storm-cluster-state (:storm-cluster-state nimbus)
         blob-store (:blob-store nimbus)
+        zk-client (:zk-client nimbus)
         local-set-of-keys (set (get-key-seq-from-blob-store blob-store))
         all-keys (set (.active-keys storm-cluster-state))
         locally-available-active-keys (set/intersection local-set-of-keys all-keys)
@@ -1298,7 +1330,7 @@
     (log-debug "Creating list of key entries for blobstore inside zookeeper" all-keys "local" locally-available-active-keys)
     (doseq [key locally-available-active-keys]
       (try
-        (.setup-blobstore! storm-cluster-state key (:nimbus-host-port-info nimbus) (get-version-for-key key nimbus-host-port-info conf))
+        (.setup-blobstore! storm-cluster-state key (:nimbus-host-port-info nimbus) (get-version-for-key key nimbus-host-port-info zk-client))
         (catch KeyNotFoundException _
           ; invalid key, remove it from blobstore
           (.deleteBlob blob-store key nimbus-subject))))))
@@ -1406,12 +1438,18 @@
         (doseq [id assigned-ids]
           (locking update-lock
             (let [orig-creds (.credentials storm-cluster-state id nil)
+                  storm-base (.storm-base storm-cluster-state id nil)
                   topology-conf (try-read-storm-conf (:conf nimbus) id blob-store)]
               (if orig-creds
                 (let [new-creds (HashMap. orig-creds)]
                   (doseq [renewer renewers]
                     (log-message "Renewing Creds For " id " with " renewer)
-                    (.renew renewer new-creds (Collections/unmodifiableMap topology-conf)))
+                    ;;Instead of trying to use reflection to make this work, lets just catch the error
+                    ;; when it does not work
+                    (try
+                      (.renew renewer new-creds (Collections/unmodifiableMap topology-conf) (:principal storm-base))
+                      (catch clojure.lang.ArityException e
+                        (.renew renewer new-creds (Collections/unmodifiableMap topology-conf)))))
                   (when-not (= orig-creds new-creds)
                     (.set-credentials! storm-cluster-state id new-creds topology-conf)
                     ))))))))
@@ -1446,6 +1484,7 @@
 (defmethod blob-sync :distributed [conf nimbus]
   (if (not (is-leader nimbus :throw-exception false))
     (let [storm-cluster-state (:storm-cluster-state nimbus)
+          zk-client (:zk-client nimbus)
           nimbus-host-port-info (:nimbus-host-port-info nimbus)
           blob-store-key-set (set (get-key-seq-from-blob-store (:blob-store nimbus)))
           zk-key-set (set (.blobstore storm-cluster-state (fn [] (blob-sync conf nimbus))))]
@@ -1454,7 +1493,8 @@
                           (BlobSynchronizer. (:blob-store nimbus) conf)
                           (.setNimbusInfo nimbus-host-port-info)
                           (.setBlobStoreKeySet blob-store-key-set)
-                          (.setZookeeperKeySet zk-key-set))]
+                          (.setZookeeperKeySet zk-key-set)
+                          (.setZkClient zk-client))]
         (.syncBlobs sync-blobs)))))
 
 (defmethod blob-sync :local [conf nimbus]
@@ -1676,9 +1716,11 @@
               submitter-user (.toLocal principal-to-local principal)
               system-user (System/getProperty "user.name")
               topo-acl (distinct (remove nil? (conj (.get storm-conf-submitted TOPOLOGY-USERS) submitter-principal, submitter-user)))
+              submitter-principal (if submitter-principal submitter-principal "")
+              submitter-user (if submitter-user submitter-user system-user)
               storm-conf (-> storm-conf-submitted
-                             (assoc TOPOLOGY-SUBMITTER-PRINCIPAL (if submitter-principal submitter-principal ""))
-                             (assoc TOPOLOGY-SUBMITTER-USER (if submitter-user submitter-user system-user)) ;Don't let the user set who we launch as
+                             (assoc TOPOLOGY-SUBMITTER-PRINCIPAL submitter-principal)
+                             (assoc TOPOLOGY-SUBMITTER-USER submitter-user) ;Don't let the user set who we launch as
                              (assoc TOPOLOGY-USERS topo-acl)
                              (assoc STORM-ZOOKEEPER-SUPERACL (.get conf STORM-ZOOKEEPER-SUPERACL)))
               storm-conf (if (Utils/isZkAuthenticationConfiguredStormServer conf)
@@ -1688,7 +1730,11 @@
               topology (normalize-topology total-storm-conf topology)
               storm-cluster-state (:storm-cluster-state nimbus)]
           (when credentials (doseq [nimbus-autocred-plugin (:nimbus-autocred-plugins nimbus)]
-                              (.populateCredentials nimbus-autocred-plugin credentials (Collections/unmodifiableMap storm-conf))))
+                              ;;Instead of using reflection just recover from the error it not being there throws
+                              (try
+                                (.populateCredentials ^INimbusCredentialPlugin nimbus-autocred-plugin ^Map credentials ^Map (Collections/unmodifiableMap storm-conf) ^String submitter-principal)
+                                (catch clojure.lang.ArityException e
+                                  (.populateCredentials ^INimbusCredentialPlugin nimbus-autocred-plugin ^Map credentials ^Map (Collections/unmodifiableMap storm-conf))))))
           (if (and (conf SUPERVISOR-RUN-WORKER-AS-USER) (or (nil? submitter-user) (.isEmpty (.trim submitter-user))))
             (throw (AuthorizationException. "Could not determine the user to run this topology as.")))
           (system-topology! total-storm-conf topology) ;; this validates the structure of the topology
@@ -1717,7 +1763,7 @@
             (notify-topology-action-listener nimbus storm-name "submitTopology")
             (let [thrift-status->kw-status {TopologyInitialStatus/INACTIVE :inactive
                                             TopologyInitialStatus/ACTIVE :active}]
-              (start-storm nimbus storm-name storm-id (thrift-status->kw-status (.get_initial_status submitOptions))))))
+              (start-storm nimbus storm-name storm-id (thrift-status->kw-status (.get_initial_status submitOptions)) submitter-user submitter-principal))))
         (catch Throwable e
           (log-warn-error e "Topology submission exception. (topology name='" storm-name "')")
           (throw e))))
@@ -2063,10 +2109,11 @@
     (^void createStateInZookeeper [this ^String blob-key]
       (let [storm-cluster-state (:storm-cluster-state nimbus)
             blob-store (:blob-store nimbus)
+            zk-client (:zk-client nimbus)
             nimbus-host-port-info (:nimbus-host-port-info nimbus)
             conf (:conf nimbus)]
         (if (instance? LocalFsBlobStore blob-store)
-          (.setup-blobstore! storm-cluster-state blob-key nimbus-host-port-info (get-version-for-key blob-key nimbus-host-port-info conf)))
+          (.setup-blobstore! storm-cluster-state blob-key nimbus-host-port-info (get-version-for-key blob-key nimbus-host-port-info zk-client)))
         (log-debug "Created state in zookeeper" storm-cluster-state blob-store nimbus-host-port-info)))
 
     (^void uploadBlobChunk [this ^String session ^ByteBuffer blob-chunk]

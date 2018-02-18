@@ -22,6 +22,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.kafka.clients.consumer.ConsumerRebalanceListener;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.storm.task.TopologyContext;
@@ -29,8 +30,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Subscribe to all topics that follow a given list of values
+ * Subscribe to all topics that follow a given list of values.
+ * @deprecated Please use {@link ManualPartitionSubscription} with {@link NamedTopicFilter} instead
  */
+@Deprecated
 public class NamedSubscription extends Subscription {
     private static final Logger LOG = LoggerFactory.getLogger(NamedSubscription.class);
     private static final long serialVersionUID = 3438543305215813839L;
@@ -56,6 +59,6 @@ public class NamedSubscription extends Subscription {
 
     @Override
     public String getTopicsString() {
-        return String.valueOf(topics);
+        return StringUtils.join(topics, ",");
     }
 }

@@ -17,20 +17,21 @@
  */
 package org.apache.storm.utils;
 
+import com.google.common.collect.Lists;
+import java.security.Principal;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.lang.StringUtils;
 import org.apache.storm.Config;
 import org.apache.storm.generated.Nimbus;
 import org.apache.storm.generated.NimbusSummary;
 import org.apache.storm.security.auth.ReqContext;
 import org.apache.storm.security.auth.ThriftClient;
 import org.apache.storm.security.auth.ThriftConnectionType;
-import com.google.common.collect.Lists;
 import org.apache.thrift.transport.TTransportException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.security.Principal;
-import java.util.List;
-import java.util.Map;
 
 public class NimbusClient extends ThriftClient {
     private Nimbus.Client _client;
@@ -57,7 +58,15 @@ public class NimbusClient extends ThriftClient {
         return getConfiguredClientAs(conf, null);
     }
 
+    public static NimbusClient getConfiguredClient(Map conf, Integer timeout) {
+        return getConfiguredClientAs(conf, null, timeout);
+    }
+
     public static NimbusClient getConfiguredClientAs(Map conf, String asUser) {
+        return getConfiguredClientAs(conf, asUser, null);
+    }
+
+    public static NimbusClient getConfiguredClientAs(Map conf, String asUser, Integer timeout) {
         if (conf.containsKey(Config.STORM_DO_AS_USER)) {
             if (asUser != null && !asUser.isEmpty()) {
                 LOG.warn("You have specified a doAsUser as param {} and a doAsParam as config, config will take precedence."
@@ -67,7 +76,7 @@ public class NimbusClient extends ThriftClient {
         }
 
         List<String> seeds;
-        if(conf.containsKey(Config.NIMBUS_HOST)) {
+        if (conf.containsKey(Config.NIMBUS_HOST) && StringUtils.isNotBlank(conf.get(Config.NIMBUS_HOST).toString())) {
             LOG.warn("Using deprecated config {} for backward compatibility. Please update your storm.yaml so it only has config {}",
                      Config.NIMBUS_HOST, Config.NIMBUS_SEEDS);
             seeds = Lists.newArrayList(conf.get(Config.NIMBUS_HOST).toString());
@@ -80,7 +89,7 @@ public class NimbusClient extends ThriftClient {
             NimbusSummary nimbusSummary;
             NimbusClient client = null;
             try {
-                client = new NimbusClient(conf, host, port, null, asUser);
+                client = new NimbusClient(conf, host, port, timeout, asUser);
                 nimbusSummary = client.getClient().getLeader();
                 if (nimbusSummary != null) {
                     String leaderNimbus = nimbusSummary.get_host() + ":" + nimbusSummary.get_port();
@@ -91,7 +100,7 @@ public class NimbusClient extends ThriftClient {
                         return ret;
                     }
                     try {
-                        return new NimbusClient(conf, nimbusSummary.get_host(), nimbusSummary.get_port(), null, asUser);
+                        return new NimbusClient(conf, nimbusSummary.get_host(), nimbusSummary.get_port(), timeout, asUser);
                     } catch (TTransportException e) {
                         throw new RuntimeException("Failed to create a nimbus client for the leader " + leaderNimbus, e);
                     }
